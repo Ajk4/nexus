@@ -338,6 +338,17 @@ impl GpuImpulseJointSet {
         }
     }
 
+    /// Joint configuration in GPU solver order (grouped by constraint color).
+    pub fn data(&self) -> &Tensor<ImpulseJoint> {
+        &self.joints
+    }
+
+    /// Mutable joint configuration for per-step motor updates. Preserve body
+    /// indices and locked axes: changing topology requires rebuilding the set.
+    pub fn data_mut(&mut self) -> &mut Tensor<ImpulseJoint> {
+        &mut self.joints
+    }
+
     /// Is this set empty?
     pub fn is_empty(&self) -> bool {
         self.len == 0

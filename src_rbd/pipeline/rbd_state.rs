@@ -20,7 +20,7 @@ use crate::shaders::utils::BatchIndices;
 use crate::utils::{ComputeGraphCache, PrefixSumWorkspace};
 
 use khal::BufferUsages;
-use khal::backend::{Backend, GpuBackend, GpuReadback};
+use khal::backend::{Backend, GpuBackend, GpuBackendError, GpuReadback};
 use std::time::Duration;
 use vortx::tensor::Tensor;
 
@@ -371,6 +371,24 @@ impl RbdState {
         &mut self.body_poses
     }
 
+    /// Live linear and angular velocities, in the same slot order as body poses.
+    pub fn body_velocities(&self) -> &Tensor<GpuVelocity> {
+        &self.vels
+    }
+
+    /// Mutable velocities for impulses and resets. Write only between steps.
+    pub fn body_velocities_mut(&mut self) -> &mut Tensor<GpuVelocity> {
+        &mut self.vels
+    }
+
+    /// Discards previous-frame contact warmstarts after teleporting bodies.
+    /// This does not change any body poses, velocities, or joint configuration.
+    pub fn clear_contact_history(&mut self, backend: &GpuBackend) -> Result<(), GpuBackendError> {
+        use khal::backend::Backend;
+        let zeros = vec![0u32; self.old_constraints_counts.len() as usize];
+        backend.write_buffer(self.old_constraints_counts.buffer_mut(), 0, &zeros)
+    }
+
     /// Live collision-pair count (total across all batches) most recently
     /// harvested by the non-blocking readback in [`RbdPipeline::auto_resize_buffers`](crate::pipeline::RbdPipeline::auto_resize_buffers). Lags the GPU by a
     /// frame or two; `0` until the first readback completes.
@@ -439,6 +457,11 @@ impl RbdState {
     /// The set of joints part of the simulation.
     pub fn joints(&self) -> &GpuImpulseJointSet {
         &self.joints
+    }
+
+    /// Mutable impulse-joint data for changing motor targets between steps.
+    pub fn joints_mut(&mut self) -> &mut GpuImpulseJointSet {
+        &mut self.joints
     }
 
     /// Mutable access to the multibody set, useful for runtime mutations like
