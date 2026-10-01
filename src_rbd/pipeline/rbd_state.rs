@@ -525,6 +525,12 @@ impl RbdState {
         &self.contacts
     }
 
+    /// GPU contact-slot bounds for the current frame. Only slots below
+    /// `ContactPlan::bound` in [`Self::contacts`] belong to this frame.
+    pub fn contact_plan(&self) -> &Tensor<ContactPlan> {
+        &self.contact_plan
+    }
+
     /// Debug: read back active contacts as `(collider_a, collider_b, body_a,
     /// body_b, manifold_len)` tuples (only `len > 0` entries).
     pub fn debug_contact_pairs(&self, backend: &GpuBackend) -> Vec<(u32, u32, u32, u32, u32)> {
