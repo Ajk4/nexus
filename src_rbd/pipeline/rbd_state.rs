@@ -389,6 +389,15 @@ impl RbdState {
         backend.write_buffer(self.old_constraints_counts.buffer_mut(), 0, &zeros)
     }
 
+    /// Previous-frame constraints used for contact warmstarting and coloring.
+    ///
+    /// GPU reset kernels can invalidate affected entries by setting both solver
+    /// body IDs to `u32::MAX` and `len` to zero. The prefix-summed body counts must
+    /// not be edited selectively: doing so would invalidate adjacent ranges.
+    pub fn contact_history_mut(&mut self) -> &mut Tensor<TwoBodyConstraint> {
+        &mut self.old_constraints
+    }
+
     /// Live collision-pair count (total across all batches) most recently
     /// harvested by the non-blocking readback in [`RbdPipeline::auto_resize_buffers`](crate::pipeline::RbdPipeline::auto_resize_buffers). Lags the GPU by a
     /// frame or two; `0` until the first readback completes.

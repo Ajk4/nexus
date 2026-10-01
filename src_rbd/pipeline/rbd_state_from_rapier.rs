@@ -641,7 +641,8 @@ impl RbdState {
         // linvel/angvel (gravity used to mask the linear part, but e.g. an
         // initial spin was lost entirely).
         debug_assert_eq!(all_vels.len(), num_bodies_total);
-        let storage: BufferUsages = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
+        let storage: BufferUsages =
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
         let shapes = Tensor::vector(backend, &all_shapes, storage).unwrap();
         let collider_local_poses =
             Tensor::vector(backend, &all_collider_local_poses, storage).unwrap();

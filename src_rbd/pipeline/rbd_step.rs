@@ -68,7 +68,7 @@ impl RbdPipeline {
         timestamps: Option<&mut GpuTimestamps>,
     ) -> Result<RunStats, GpuBackendError> {
         let mut encoder = backend.begin_encoding();
-        let stats = self.step_impl(backend, state, timestamps, &mut encoder, true)?;
+        let stats = self.step_impl(backend, state, timestamps, &mut encoder, true, false)?;
         backend.submit(encoder)?;
         Ok(stats)
     }
@@ -87,7 +87,24 @@ impl RbdPipeline {
         timestamps: Option<&mut GpuTimestamps>,
         encoder: &mut <GpuBackend as Backend>::Encoder,
     ) -> Result<RunStats, GpuBackendError> {
-        self.step_impl(backend, state, timestamps, encoder, false)
+        self.step_impl(backend, state, timestamps, encoder, false, false)
+    }
+
+    /// Records a step whose buffer bindings remain valid on repeated replay.
+    ///
+    /// Unlike `step_encoded`, copies solved contact history into the previous
+    /// frame buffers instead of swapping their host handles. This permits a
+    /// single captured timestep to be replayed repeatedly with correct warmstart
+    /// history. Execute one uncaptured step first to initialize lazy workspaces.
+    /// Use fixed capacities and do not resize or replace buffers while the
+    /// captured commands remain in use.
+    pub fn step_encoded_replayable(
+        &self,
+        backend: &GpuBackend,
+        state: &mut RbdState,
+        encoder: &mut <GpuBackend as Backend>::Encoder,
+    ) -> Result<RunStats, GpuBackendError> {
+        self.step_impl(backend, state, None, encoder, false, true)
     }
 
     /// Whether the step uses the fused colored-sweep kernels (one workgroup per
@@ -120,6 +137,7 @@ impl RbdPipeline {
         mut timestamps: Option<&mut GpuTimestamps>,
         encoder: &mut <GpuBackend as Backend>::Encoder,
         allow_splits: bool,
+        stable_history: bool,
     ) -> Result<RunStats, GpuBackendError> {
         // Submit what is recorded so far and start a fresh encoder, so CPU
         // encoding overlaps GPU work. A no-op in encoded mode, where everything
@@ -569,24 +587,43 @@ impl RbdPipeline {
             split(&mut *encoder)?;
         }
 
-        // Swap buffers for warm-starting next frame
-        std::mem::swap(&mut state.old_constraints, &mut state.new_constraints);
-        std::mem::swap(
-            &mut state.old_constraint_builders,
-            &mut state.new_constraint_builders,
-        );
-        std::mem::swap(
-            &mut state.old_body_constraint_ids,
-            &mut state.new_body_constraint_ids,
-        );
-        std::mem::swap(
-            &mut state.old_constraints_counts,
-            &mut state.new_constraints_counts,
-        );
-        std::mem::swap(
-            &mut state.old_constraints_colors,
-            &mut state.constraints_colors,
-        );
+        if stable_history {
+            macro_rules! retain_history {
+                ($new:ident, $old:ident) => {
+                    encoder.copy_buffer_to_buffer(
+                        state.$new.buffer(),
+                        0,
+                        state.$old.buffer_mut(),
+                        0,
+                        state.$new.len() as usize,
+                    )?;
+                };
+            }
+            retain_history!(new_constraints, old_constraints);
+            retain_history!(new_constraint_builders, old_constraint_builders);
+            retain_history!(new_body_constraint_ids, old_body_constraint_ids);
+            retain_history!(new_constraints_counts, old_constraints_counts);
+            retain_history!(constraints_colors, old_constraints_colors);
+        } else {
+            // Swap buffers for warm-starting next frame
+            std::mem::swap(&mut state.old_constraints, &mut state.new_constraints);
+            std::mem::swap(
+                &mut state.old_constraint_builders,
+                &mut state.new_constraint_builders,
+            );
+            std::mem::swap(
+                &mut state.old_body_constraint_ids,
+                &mut state.new_body_constraint_ids,
+            );
+            std::mem::swap(
+                &mut state.old_constraints_counts,
+                &mut state.new_constraints_counts,
+            );
+            std::mem::swap(
+                &mut state.old_constraints_colors,
+                &mut state.constraints_colors,
+            );
+        }
 
         Ok(stats)
     }
@@ -682,14 +719,16 @@ impl RbdPipeline {
 
                 // The color-bucket buffer is strided by `max_colors + 3`:
                 // regrow it and update the stride in `BatchIndices`.
-                let storage: BufferUsages = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
+                let storage: BufferUsages =
+                    BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
                 let stride = state.max_colors + 3;
                 let nb = state.num_batches;
                 state.color_buckets = Tensor::vector_uninit(backend, stride * nb, storage)?;
                 state.rebuild_batch_indices(backend);
             }
 
-            let storage: BufferUsages = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
+            let storage: BufferUsages =
+                BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
 
             // Flat pair / PFM buffers: sized by the TOTAL demand across all
             // batches (the whole point of the flat layout: one hot batch no
