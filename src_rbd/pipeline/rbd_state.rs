@@ -524,6 +524,11 @@ impl RbdState {
         &self.shapes
     }
 
+    /// Mutable collider shapes, for updating procedural terrain on any backend.
+    pub fn shapes_mut(&mut self) -> &mut Tensor<Shape> {
+        &mut self.shapes
+    }
+
     /// Per-collider parent rigid-body slot map (env-local). For debugging.
     pub fn collider_parent(&self) -> &Tensor<u32> {
         &self.collider_parent
