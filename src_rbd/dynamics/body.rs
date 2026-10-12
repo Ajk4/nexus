@@ -401,7 +401,7 @@ fn convert_local_mprops(mprops: &MassProperties) -> LocalMassProperties {
         LocalMassProperties {
             inv_mass: glamx::Vec2::splat(mprops.inv_mass),
             com: mprops.local_com,
-            padding2: 0,
+            locked_axes: 0,
             inv_inertia: mprops.inv_principal_inertia,
         }
     }
@@ -414,7 +414,7 @@ fn convert_local_mprops(mprops: &MassProperties) -> LocalMassProperties {
             inv_mass: glamx::Vec3::splat(mprops.inv_mass),
             padding1: 0,
             com: mprops.local_com,
-            padding2: 0,
+            locked_axes: 0,
         }
     }
 }

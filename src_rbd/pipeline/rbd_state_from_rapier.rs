@@ -219,7 +219,8 @@ impl RbdState {
                 |body_pose: &Pose, dynamic_body: Option<&crate::rapier::dynamics::RigidBody>| {
                     if let Some(b) = dynamic_body {
                         let m = b.mass_properties();
-                        let local = local_mprops_from_rapier(&m.local_mprops);
+                        let mut local = local_mprops_from_rapier(&m.local_mprops);
+                        local.locked_axes = b.locked_axes().bits() as u32;
                         let world = world_mprops_from_local(body_pose, &local);
                         (local, world)
                     } else {

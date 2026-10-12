@@ -630,7 +630,7 @@ pub(super) fn local_mprops_from_rapier(
         GpuLocalMassProperties {
             inv_mass: glamx::Vec2::splat(mprops.inv_mass),
             com: mprops.local_com,
-            padding2: 0,
+            locked_axes: 0,
             inv_inertia: mprops.inv_principal_inertia,
         }
     }
@@ -643,7 +643,7 @@ pub(super) fn local_mprops_from_rapier(
             inv_mass: glamx::Vec3::splat(mprops.inv_mass),
             padding1: 0,
             com: mprops.local_com,
-            padding2: 0,
+            locked_axes: 0,
         }
     }
 }
@@ -655,38 +655,7 @@ pub(super) fn world_mprops_from_local(
     pose: &Pose,
     local: &GpuLocalMassProperties,
 ) -> GpuWorldMassProperties {
-    #[cfg(feature = "dim2")]
-    {
-        GpuWorldMassProperties {
-            inv_inertia: local.inv_inertia,
-            inv_mass: local.inv_mass,
-            padding1: 0,
-            com: *pose * local.com,
-        }
-    }
-    #[cfg(feature = "dim3")]
-    {
-        // Build the world-space inverse inertia tensor: R * diag * R^T, with R
-        // the rotation taking body space to the world principal-inertia frame.
-        // Mirrors the GPU `update_mprops` shader so the buffer is consistent
-        // before the first `update_mprops` dispatch.
-        let world_principal_frame = pose.rotation * local.inertia_ref_frame;
-        let rot_mat = glamx::Mat3::from_quat(world_principal_frame);
-        let scaled = glamx::Mat3::from_cols(
-            rot_mat.x_axis * local.inv_principal_inertia.x,
-            rot_mat.y_axis * local.inv_principal_inertia.y,
-            rot_mat.z_axis * local.inv_principal_inertia.z,
-        );
-        let inv_inertia_3 = scaled * rot_mat.transpose();
-        let inv_inertia = glamx::Mat4::from_mat3(inv_inertia_3);
-        GpuWorldMassProperties {
-            inv_inertia,
-            inv_mass: local.inv_mass,
-            padding0: 0,
-            com: *pose * local.com,
-            padding1: 0,
-        }
-    }
+    local.to_world(pose)
 }
 
 /// GPU-resident rigid-body reset templates (see

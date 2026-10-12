@@ -25,6 +25,33 @@ fn inv(x: f32) -> f32 {
     if x == 0.0 { 0.0 } else { 1.0 / x }
 }
 
+#[cfg(all(test, feature = "dim3"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn friction_stops_motion_with_locked_tangent_axis() {
+        let mut constraint = TwoBodyConstraint {
+            dir_a: Vec3::Y,
+            tangent_a: Vec3::X,
+            im_a: Vec3::new(1., 1., 0.),
+            limit: 1.,
+            len: 1,
+            ..Default::default()
+        };
+        constraint.elements[0].normal_part.impulse = 1.;
+        constraint.elements[0].tangent_part.r = [1., 0., 0.];
+        let mut moving = Velocity::new(Vec3::X, Vec3::ZERO);
+        let mut fixed = Velocity::default();
+        constraint.solve_constraint_gauss_seidel(&mut moving, &mut fixed, false);
+        assert!(
+            moving.linear.length() < 1e-6,
+            "friction did not stop the body: {:?}",
+            moving.linear
+        );
+    }
+}
+
 /// Helper function for maybe inverse with threshold.
 #[cfg(feature = "dim3")]
 fn maybe_inv(a: f32) -> f32 {
@@ -637,10 +664,18 @@ impl TwoBodyConstraint {
                 let k22 = c.r.read(1);
                 let k12 = c.r.read(2) * 0.5;
                 let inv_det = maybe_inv(k11 * k22 - k12 * k12);
-                let delta_impulse = Vec2::new(
-                    (k22 * dvel_0 - k12 * dvel_1) * inv_det,
-                    (k11 * dvel_1 - k12 * dvel_0) * inv_det,
-                );
+                let delta_impulse = if inv_det != 0.0 {
+                    Vec2::new(
+                        (k22 * dvel_0 - k12 * dvel_1) * inv_det,
+                        (k11 * dvel_1 - k12 * dvel_0) * inv_det,
+                    )
+                } else {
+                    // Axis locks can leave a rank-one tangent mass matrix.
+                    // Its pseudoinverse is K / trace(K)^2.
+                    let inverse_trace = inv(k11 + k22);
+                    Vec2::new(k11 * dvel_0 + k12 * dvel_1, k12 * dvel_0 + k22 * dvel_1)
+                        * (inverse_trace * inverse_trace)
+                };
                 let mut new_impulse = c.impulse - delta_impulse;
                 new_impulse = cap_magnitude(new_impulse, limit);
 

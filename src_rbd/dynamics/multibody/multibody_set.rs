@@ -1216,7 +1216,7 @@ pub(super) fn convert_link_mprops(
         inv_mass: glamx::Vec3::splat(m.inv_mass),
         padding1: 0,
         com: m.local_com,
-        padding2: 0,
+        locked_axes: 0,
     }
 }
 

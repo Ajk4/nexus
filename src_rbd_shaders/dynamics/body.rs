@@ -37,7 +37,8 @@ pub struct LocalMassProperties {
     /// The rigid-body's center of mass in local coordinates.
     pub com: Vector,
 
-    pub padding2: u32,
+    /// Rapier axis-lock bits, applied in world coordinates.
+    pub locked_axes: u32,
 
     #[cfg(feature = "dim2")]
     /// The inverse inertia tensor (scalar in 2D).
@@ -57,7 +58,7 @@ impl Default for LocalMassProperties {
             #[cfg(feature = "dim3")]
             padding1: 0,
             com: Vector::ZERO,
-            padding2: 0,
+            locked_axes: 0,
             #[cfg(feature = "dim2")]
             inv_inertia: 1.0,
         }
@@ -65,14 +66,23 @@ impl Default for LocalMassProperties {
 }
 
 impl LocalMassProperties {
+    fn _axis_unlocked(&self, axis: u32) -> f32 {
+        if self.locked_axes & (1 << axis) == 0 {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
     #[cfg(feature = "dim2")]
     /// Updates world-space mass properties from local properties and current pose (2D version).
     pub fn to_world(&self, pose: &Pose) -> WorldMassProperties {
         let world_com = pose * self.com;
 
         WorldMassProperties {
-            inv_inertia: self.inv_inertia,
-            inv_mass: self.inv_mass,
+            inv_inertia: self.inv_inertia * self._axis_unlocked(5),
+            inv_mass: self.inv_mass
+                * glamx::Vec2::new(self._axis_unlocked(0), self._axis_unlocked(1)),
             com: world_com,
             padding1: 0,
         }
@@ -89,10 +99,25 @@ impl LocalMassProperties {
             rot_mat.z_axis * self.inv_principal_inertia.z,
         );
         let world_inv_inertia = scaled_rot_mat * rot_mat.transpose();
+        let translation_mask = Vec3::new(
+            self._axis_unlocked(0),
+            self._axis_unlocked(1),
+            self._axis_unlocked(2),
+        );
+        let rotation_mask = Vec3::new(
+            self._axis_unlocked(3),
+            self._axis_unlocked(4),
+            self._axis_unlocked(5),
+        );
+        let world_inv_inertia = Mat3::from_cols(
+            world_inv_inertia.x_axis * rotation_mask * rotation_mask.x,
+            world_inv_inertia.y_axis * rotation_mask * rotation_mask.y,
+            world_inv_inertia.z_axis * rotation_mask * rotation_mask.z,
+        );
 
         WorldMassProperties {
             inv_inertia: glamx::Mat4::from_mat3(world_inv_inertia),
-            inv_mass: self.inv_mass,
+            inv_mass: self.inv_mass * translation_mask,
             com: world_com,
             padding0: 0,
             padding1: 0,
@@ -323,4 +348,26 @@ pub struct RigidBodyState {
 
     /// The rigid-body's velocity (linear and angular).
     pub velocity: Velocity,
+}
+
+#[cfg(all(test, feature = "dim3"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn axis_locks_block_forces_in_world_coordinates() {
+        let local = LocalMassProperties {
+            locked_axes: (1 << 2) | (1 << 3) | (1 << 4),
+            inv_principal_inertia: Vec3::new(1.0, 2.0, 3.0),
+            ..Default::default()
+        };
+        let pose = Pose::from_parts(Vec3::ZERO, Quat::from_rotation_y(0.7));
+        let world = local.to_world(&pose);
+        let velocity =
+            Force::new(Vec3::ONE, Vec3::ONE).integrate(&world, &Velocity::default(), 1.0);
+        assert_eq!(velocity.linear, Vec3::new(1.0, 1.0, 0.0));
+        assert_eq!(velocity.angular.x, 0.0);
+        assert_eq!(velocity.angular.y, 0.0);
+        assert!(velocity.angular.z > 0.0);
+    }
 }
