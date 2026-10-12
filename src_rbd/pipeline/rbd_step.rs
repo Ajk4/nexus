@@ -301,6 +301,7 @@ impl RbdPipeline {
                     &mut state.collision_pairs_indirect,
                     &state.collision_groups,
                     &state.pair_filter,
+                    &state.sim_params,
                 )?;
 
                 drop(pass);

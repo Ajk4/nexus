@@ -497,6 +497,7 @@ pub fn gpu_lbvh_find_collision_pairs(
     collision_groups: &[InteractionGroups],
     #[spirv(uniform, descriptor_set = 0, binding = 4)] batch_ids: &BatchIndices,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] pair_filter: &[[u32; 2]],
+    #[spirv(uniform, descriptor_set = 0, binding = 6)] params: &crate::dynamics::RbdSimParams,
 ) {
     let num_threads = num_workgroups.x * WORKGROUP_SIZE;
     let batch_id = invocation_id.y;
@@ -513,8 +514,7 @@ pub fn gpu_lbvh_find_collision_pairs(
         let groups_i = collision_groups[i as usize];
         let filter_i = pair_filter[i as usize];
         let mut aabb1 = tree.at((first_leaf_id + leaf_i) as usize).aabb;
-        let prediction = 2.0e-3; // TODO: should be configurable.
-        let dilation = Vector::splat(prediction);
+        let dilation = Vector::splat(params.prediction_distance());
         aabb1.mins -= dilation;
         aabb1.maxs += dilation;
 

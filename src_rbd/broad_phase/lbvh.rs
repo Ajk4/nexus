@@ -301,6 +301,7 @@ impl Lbvh {
         collision_pairs_indirect: &mut Tensor<[u32; 3]>,
         collision_groups: &Tensor<crate::rapier::geometry::InteractionGroups>,
         pair_filter: &Tensor<[u32; 2]>,
+        params: &Tensor<crate::shaders::dynamics::RbdSimParams>,
     ) -> Result<(), GpuBackendError> {
         // One thread per live collider (leaf); padding slots aren't in the tree.
         let colliders_per_batch = active_per_batch;
@@ -317,6 +318,7 @@ impl Lbvh {
             collision_groups,
             batch_indices,
             pair_filter,
+            params,
         )?;
         self.shaders.flat_list_dispatch.call(
             pass,
@@ -392,3 +394,54 @@ impl Lbvh {
 /// [`Lbvh::brute_force_pairs`] instead of building a tree.
 /// `NEXUS_DISABLE_BF=1` forces the LBVH path (A/B debugging).
 pub const BRUTE_FORCE_MAX_COLLIDERS: u32 = 64;
+
+#[cfg(all(test, feature = "cpu", feature = "dim2"))]
+mod tests {
+    use super::*;
+    use crate::pipeline::{RbdCapacities, RbdPipeline, RbdState};
+    use crate::rapier::prelude::*;
+    use crate::shaders::dynamics::RbdSimParams;
+
+    #[test]
+    fn prediction_distance_applies_to_both_broad_phases() {
+        for count in [2, BRUTE_FORCE_MAX_COLLIDERS + 1] {
+            for prediction in [0.05, 0.2] {
+                let backend = GpuBackend::Cpu;
+                let mut bodies = RigidBodySet::new();
+                let mut colliders = ColliderSet::new();
+                for i in 0..count {
+                    let body = if i == 1 {
+                        RigidBodyBuilder::dynamic().translation(crate::math::Vec2::new(0.3, 0.))
+                    } else {
+                        RigidBodyBuilder::fixed()
+                            .translation(crate::math::Vec2::new(i as f32 * 10., 0.))
+                    };
+                    let handle = bodies.insert(body);
+                    colliders.insert_with_parent(ColliderBuilder::ball(0.1), handle, &mut bodies);
+                }
+                let joints = ImpulseJointSet::new();
+                let multibodies = MultibodyJointSet::new();
+                let params = RbdSimParams {
+                    normalized_prediction_distance: prediction,
+                    ..RbdSimParams::default()
+                };
+                let mut state = RbdState::from_rapier(
+                    &backend,
+                    &[(&bodies, &colliders, &joints, &multibodies, &params)],
+                    RbdCapacities::default(),
+                );
+                state.set_gravity(&backend, [0.; 3]);
+                RbdPipeline::new(&backend)
+                    .unwrap()
+                    .step(&backend, &mut state, None)
+                    .unwrap();
+                let pairs = state.collision_pairs_len_gpu().buffer().unwrap_slice()[0];
+                assert_eq!(
+                    pairs,
+                    u32::from(prediction > 0.1),
+                    "count={count}, prediction={prediction}"
+                );
+            }
+        }
+    }
+}
