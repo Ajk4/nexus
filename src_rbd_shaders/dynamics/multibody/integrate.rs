@@ -277,7 +277,6 @@ pub fn gpu_mb_integrate(
             wa,
             num_links,
         );
-        _propagate_velocities(num_links, &stat_slice, &dof_vel, links_workspace, wa);
         let (_, new_center, _) = _centroid(&stat_slice, links_workspace, wa, num_links);
         // Advance the system COM using its linear momentum. Joint motion
         // changes the body's offset from that COM, not its translation rate.
