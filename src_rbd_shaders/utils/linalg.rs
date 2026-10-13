@@ -468,8 +468,8 @@ pub fn gemm_skew_tr_lhs_cross_buf(
         let bw = buf_b.read(b.idx(0, j));
         let i0 = c.idx(0, j);
         let i1 = c.idx(1, j);
-        buf_c.write(i0, beta * buf_c.read(i0) + alpha * (t.y * bw));
-        buf_c.write(i1, beta * buf_c.read(i1) + alpha * (-t.x * bw));
+        buf_c.write(i0, beta * buf_c.read(i0) + alpha * (-t.y * bw));
+        buf_c.write(i1, beta * buf_c.read(i1) + alpha * (t.x * bw));
     }
 }
 
@@ -612,19 +612,19 @@ pub fn gemm_omega_skew_tr_cross_buf(
     beta: f32,
 ) {
     // [ω]_× · skew_tr(shift) acting on a scalar bw:
-    // skew_tr(shift) · bw = (shift.y · bw, -shift.x · bw)
-    // [ω]_× · (a, b) = (-ω · b, ω · a) = (ω · shift.x · bw, ω · shift.y · bw)
+    // skew_tr(shift) · bw = (-shift.y · bw, shift.x · bw)
+    // [ω]_× then gives (-ω · shift.x · bw, -ω · shift.y · bw).
     for j in 0..c.cols {
         let bw = buf_b.read(b.idx(0, j));
         let i0 = c.idx(0, j);
         let i1 = c.idx(1, j);
         buf_c.write(
             i0,
-            beta * buf_c.read(i0) + alpha * (parent_w * shift.x * bw),
+            beta * buf_c.read(i0) - alpha * (parent_w * shift.x * bw),
         );
         buf_c.write(
             i1,
-            beta * buf_c.read(i1) + alpha * (parent_w * shift.y * bw),
+            beta * buf_c.read(i1) - alpha * (parent_w * shift.y * bw),
         );
     }
 }
@@ -656,8 +656,8 @@ pub fn gemm_skew_tr_lhs(buf: &mut [f32], c: MatSlice, alpha: f32, t: Vec2, b: Ma
         let bw = buf.read(b.idx(0, j));
         let i0 = c.idx(0, j);
         let i1 = c.idx(1, j);
-        buf.write(i0, beta * buf.read(i0) + alpha * (t.y * bw));
-        buf.write(i1, beta * buf.read(i1) + alpha * (-t.x * bw));
+        buf.write(i0, beta * buf.read(i0) + alpha * (-t.y * bw));
+        buf.write(i1, beta * buf.read(i1) + alpha * (t.x * bw));
     }
 }
 
@@ -888,8 +888,8 @@ pub fn gemm_skew_tr_lhs_par(
         let bw = buf.read(b.idx(0, j));
         let i0 = c.idx(0, j);
         let i1 = c.idx(1, j);
-        buf.write(i0, beta * buf.read(i0) + alpha * (t.y * bw));
-        buf.write(i1, beta * buf.read(i1) + alpha * (-t.x * bw));
+        buf.write(i0, beta * buf.read(i0) + alpha * (-t.y * bw));
+        buf.write(i1, beta * buf.read(i1) + alpha * (t.x * bw));
     }
 }
 
@@ -1085,8 +1085,8 @@ pub fn gemm_skew_tr_lhs_cross_buf_par(
         let bw = buf_b.read(b.idx(0, j));
         let i0 = c.idx(0, j);
         let i1 = c.idx(1, j);
-        buf_c.write(i0, beta * buf_c.read(i0) + alpha * (t.y * bw));
-        buf_c.write(i1, beta * buf_c.read(i1) + alpha * (-t.x * bw));
+        buf_c.write(i0, beta * buf_c.read(i0) + alpha * (-t.y * bw));
+        buf_c.write(i1, beta * buf_c.read(i1) + alpha * (t.x * bw));
     }
 }
 
@@ -1271,11 +1271,11 @@ pub fn gemm_omega_skew_tr_cross_buf_par(
         let i1 = c.idx(1, j);
         buf_c.write(
             i0,
-            beta * buf_c.read(i0) + alpha * (parent_w * shift.x * bw),
+            beta * buf_c.read(i0) - alpha * (parent_w * shift.x * bw),
         );
         buf_c.write(
             i1,
-            beta * buf_c.read(i1) + alpha * (parent_w * shift.y * bw),
+            beta * buf_c.read(i1) - alpha * (parent_w * shift.y * bw),
         );
     }
 }
