@@ -277,6 +277,93 @@ async fn _read<T: bytemuck::Pod + Send + Sync>(
     values
 }
 
+fn _rotation(angle: f32) -> crate::math::Rotation {
+    #[cfg(feature = "dim2")]
+    {
+        crate::math::Rotation::from_angle(angle)
+    }
+    #[cfg(feature = "dim3")]
+    {
+        crate::math::Rotation::from_rotation_z(angle)
+    }
+}
+
+#[futures_test::test]
+async fn articulation_gpu_state_reset() {
+    use crate::dynamics::GpuArticulationCommands;
+    use khal::BufferUsages;
+    use vortx::tensor::Tensor;
+    let backend = _backend().await;
+    let kernels = GpuArticulationCommands::new(&backend).unwrap();
+    for fixed in [false, true] {
+        let scenes = [
+            _scene(fixed, true, false, true),
+            _scene(fixed, true, false, true),
+            _scene(fixed, true, false, true),
+        ];
+        let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 32);
+        pipeline.step(&backend, &mut state, None).unwrap();
+        let before = _poses(&backend, &state).await;
+        let before_vels = _read(&backend, state.body_velocities()).await;
+        let links = _read(&backend, state.multibodies().links_static()).await;
+        let dpb = state.multibodies().dofs_per_batch() as usize;
+        let mut coords = vec![0.0; dpb * 3];
+        coords[links[4].assembly_id as usize * 3 + 1] = 0.2;
+        coords[links[7].assembly_id as usize * 3 + 1] = -0.1;
+        let mut vels = vec![0.0; dpb * 3];
+        if !fixed {
+            vels[1] = 0.3;
+            vels[4] = -0.2;
+        }
+        let root = Pose::from_parts(_v(3.0, 4.0), _rotation(0.7));
+        let storage = BufferUsages::STORAGE;
+        let selected = Tensor::vector(&backend, &[0u32, 1, 0], storage).unwrap();
+        let roots = Tensor::vector(&backend, &[root; 3], storage).unwrap();
+        let coords = Tensor::vector(&backend, coords, storage).unwrap();
+        let vels = Tensor::vector(&backend, vels, storage).unwrap();
+        let mut encoder = backend.begin_encoding();
+        state
+            .encode_articulation_reset(&mut encoder, &kernels, &selected, &roots, &coords, &vels)
+            .unwrap();
+        backend.submit(encoder).unwrap();
+        let after = _poses(&backend, &state).await;
+        let after_vels = _read(&backend, state.body_velocities()).await;
+        let child = root
+            * Pose::from_translation(_v(0.5, 0.0))
+            * Pose::from_parts(Vector::ZERO, _rotation(0.2))
+            * Pose::from_translation(_v(0.5, 0.0));
+        let tip = child * Pose::from_translation(_v(0.9, 0.0));
+        for (body, expected) in [root, child, tip].into_iter().enumerate() {
+            assert!(
+                after[body * 3 + 1]
+                    .translation
+                    .distance(expected.translation)
+                    < 1.0e-5
+            );
+            assert!(
+                (after[body * 3 + 1].rotation * Vector::X).distance(expected.rotation * Vector::X)
+                    < 1.0e-5
+            );
+            assert!(
+                after_vels[body * 3 + 1].linear.distance(if fixed {
+                    Vector::ZERO
+                } else {
+                    _v(0.3, -0.2)
+                }) < 1.0e-5
+            );
+        }
+        for body in 0..state.num_colliders_per_batch() as usize {
+            for batch in [0, 2] {
+                assert_eq!(after[body * 3 + batch], before[body * 3 + batch]);
+                assert_eq!(
+                    after_vels[body * 3 + batch].linear,
+                    before_vels[body * 3 + batch].linear
+                );
+            }
+        }
+    }
+}
+
 #[futures_test::test]
 async fn articulation_roots_kinematics_and_dynamics() {
     let backend = _backend().await;

@@ -135,7 +135,7 @@ pub fn gpu_mb_compute_dynamics_pre(
 
     // 1) Forward Kinematics (single-threaded)
     if active_slot && num_links > 0 && lane == 0 {
-        forward_kinematics(
+        _forward_kinematics(
             &mb,
             &stat_slice,
             &mut poses_slice,
@@ -162,7 +162,7 @@ pub fn gpu_mb_compute_dynamics_pre(
 
     // 3) Propagate velocities (single-threaded)
     if active_slot && num_links > 0 && lane == 0 {
-        propagate_velocities(num_links, &stat_slice, &vel_slice, links_workspace, wa);
+        _propagate_velocities(num_links, &stat_slice, &vel_slice, links_workspace, wa);
     }
     sync_slots(t);
 
@@ -623,7 +623,7 @@ fn jacobian_mul_coordinates(
 
 // Forward-kinematics traversing all the links of a given mulitbody
 // sequentially on a single thread.
-fn forward_kinematics(
+pub(super) fn _forward_kinematics(
     mb: &MultibodyInfo,
     stat_slice: &ISlice<MultibodyLinkStatic>,
     poses_slice: &mut ISliceMut<Pose>,
@@ -767,7 +767,7 @@ fn update_body_jacobians(
     }
 }
 
-fn propagate_velocities(
+pub(super) fn _propagate_velocities(
     num_links: u32,
     stat_slice: &ISlice<MultibodyLinkStatic>,
     vel_slice: &ISlice<f32>,
