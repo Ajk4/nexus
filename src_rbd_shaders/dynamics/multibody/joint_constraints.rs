@@ -551,7 +551,7 @@ fn build_motor_constraint(
 ///
 /// The M⁻¹-column back-solve is a separate dispatch
 /// ([`gpu_mb_finalize_joint_constraints`]), so each pass fits 8 storage buffers.
-#[spirv_bindgen]
+#[spirv_bindgen(force_cpu_coroutines)]
 #[spirv(compute(threads(64)))]
 pub fn gpu_mb_init_joint_constraints(
     #[spirv(workgroup_id)] workgroup_id: UVec3,
