@@ -125,6 +125,19 @@ fn _write_factor(words: &mut ISliceMut<u32>, node: usize, factor: ArticulatedBod
     }
 }
 
+fn _write_matrix(words: &mut ISliceMut<u32>, offset: usize, matrix: Matrix) {
+    for i in 0..S * S {
+        words[offset + i] = matrix[i].to_bits();
+    }
+}
+
+fn _write_solve_factor(words: &mut ISliceMut<u32>, offset: usize, factor: TreeSolveFactor) {
+    _write_matrix(words, offset, factor.inverse);
+    _write_matrix(words, offset + S * S, factor.reaction);
+    _write_matrix(words, offset + 2 * S * S, factor.parent_velocity);
+    _write_matrix(words, offset + 3 * S * S, factor.parent_coriolis);
+}
+
 fn _transpose(a: Matrix) -> Matrix {
     let mut out = [0.; S * S];
     for r in 0..S {
@@ -541,10 +554,13 @@ pub fn gpu_mb_factor_articulated_body(
     }
     for reverse in 0..mb.num_links {
         let k = mb.num_links - 1 - reverse;
-        let mut node = _read_factor(&tree.as_ref(), k as usize);
+        let offset = k as usize * ARTICULATED_FACTOR_WORDS;
+        let parent = tree[offset] as usize * ARTICULATED_FACTOR_WORDS;
+        let dof = tree[offset + 1] as usize;
+        let ndofs = tree[offset + 2] as usize;
         let mut diagonal = [0.; S];
-        for c in 0..node.ndofs as usize {
-            let d = node.dof as usize + c;
+        for c in 0..ndofs {
+            let d = dof + c;
             diagonal[c] = if state[5 * stride + d] != 0. {
                 1.
             } else {
@@ -552,46 +568,50 @@ pub fn gpu_mb_factor_articulated_body(
             };
         }
         let (plain, pa, _) = _eliminate(
-            node.plain_inertia,
+            _read_matrix(&tree.as_ref(), offset + 4 + 12 * S * S),
             [0.; S * S],
-            node.motion,
+            _read_matrix(&tree.as_ref(), offset + 4 + S * S),
             [0.; S * S],
             diagonal,
-            node.ndofs as usize,
+            ndofs,
         );
-        let (implicit, ia, ib) = _eliminate(
-            node.implicit_inertia,
-            node.implicit_derivative,
-            node.motion,
-            node.coriolis_motion,
-            diagonal,
-            node.ndofs as usize,
-        );
-        node.plain = plain;
-        node.implicit = implicit;
-        _write_factor(&mut tree, k as usize, node);
+        _write_solve_factor(&mut tree, offset + 4 + 4 * S * S, plain);
         if k != 0 {
-            let mut parent = _read_factor(&tree.as_ref(), node.parent as usize);
-            let xt = _transpose(node.transform);
-            parent.plain_inertia = _add(
-                parent.plain_inertia,
-                _multiply(xt, _multiply(pa, node.transform)),
+            let transform = _read_matrix(&tree.as_ref(), offset + 4);
+            let inertia = _add(
+                _read_matrix(&tree.as_ref(), parent + 4 + 12 * S * S),
+                _multiply(_transpose(transform), _multiply(pa, transform)),
             );
-            parent.implicit_inertia = _add(
-                parent.implicit_inertia,
+            _write_matrix(&mut tree, parent + 4 + 12 * S * S, inertia);
+        }
+        let (implicit, ia, ib) = _eliminate(
+            _read_matrix(&tree.as_ref(), offset + 4 + 13 * S * S),
+            _read_matrix(&tree.as_ref(), offset + 4 + 14 * S * S),
+            _read_matrix(&tree.as_ref(), offset + 4 + S * S),
+            _read_matrix(&tree.as_ref(), offset + 4 + 3 * S * S),
+            diagonal,
+            ndofs,
+        );
+        _write_solve_factor(&mut tree, offset + 4 + 8 * S * S, implicit);
+        if k != 0 {
+            let transform = _read_matrix(&tree.as_ref(), offset + 4);
+            let xt = _transpose(transform);
+            let inertia = _add(
+                _read_matrix(&tree.as_ref(), parent + 4 + 13 * S * S),
                 _multiply(
                     xt,
                     _add(
-                        _multiply(ia, node.transform),
-                        _multiply(ib, node.coriolis_parent),
+                        _multiply(ia, transform),
+                        _multiply(ib, _read_matrix(&tree.as_ref(), offset + 4 + 2 * S * S)),
                     ),
                 ),
             );
-            parent.implicit_derivative = _add(
-                parent.implicit_derivative,
-                _multiply(xt, _multiply(ib, node.transform)),
+            _write_matrix(&mut tree, parent + 4 + 13 * S * S, inertia);
+            let derivative = _add(
+                _read_matrix(&tree.as_ref(), parent + 4 + 14 * S * S),
+                _multiply(xt, _multiply(ib, transform)),
             );
-            _write_factor(&mut tree, node.parent as usize, parent);
+            _write_matrix(&mut tree, parent + 4 + 14 * S * S, derivative);
         }
     }
 }
