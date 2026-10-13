@@ -305,6 +305,7 @@ async fn articulation_gpu_state_reset() {
         pipeline.step(&backend, &mut state, None).unwrap();
         let before = _poses(&backend, &state).await;
         let before_vels = _read(&backend, state.body_velocities()).await;
+        let before_joints = _read(&backend, state.multibodies().joint_constraints()).await;
         let links = _read(&backend, state.multibodies().links_static()).await;
         let dpb = state.multibodies().dofs_per_batch() as usize;
         let mut coords = vec![0.0; dpb * 3];
@@ -328,6 +329,15 @@ async fn articulation_gpu_state_reset() {
         backend.submit(encoder).unwrap();
         let after = _poses(&backend, &state).await;
         let after_vels = _read(&backend, state.body_velocities()).await;
+        let after_joints = _read(&backend, state.multibodies().joint_constraints()).await;
+        for (index, (before, after)) in before_joints.iter().zip(&after_joints).enumerate() {
+            if index % 3 == 1 {
+                assert_eq!(after.kind, 0);
+                assert_eq!(after.impulse, 0.0);
+            } else {
+                assert_eq!(bytemuck::bytes_of(before), bytemuck::bytes_of(after));
+            }
+        }
         let child = root
             * Pose::from_translation(_v(0.5, 0.0))
             * Pose::from_parts(Vector::ZERO, _rotation(0.2))
@@ -361,7 +371,89 @@ async fn articulation_gpu_state_reset() {
                 );
             }
         }
+        let solver_vels = _read(&backend, &state.solver_vels).await;
+        let increments = _read(&backend, &state.solver_vels_inc).await;
+        for body in 0..state.num_active_bodies as usize {
+            assert_eq!(
+                solver_vels[body * 3 + 1].linear,
+                after_vels[body * 3 + 1].linear
+            );
+            assert_eq!(increments[body * 3 + 1].linear, Vector::ZERO);
+        }
     }
+}
+
+#[futures_test::test]
+async fn articulation_gpu_contact_reset() {
+    use crate::dynamics::GpuArticulationCommands;
+    use khal::BufferUsages;
+    use vortx::tensor::Tensor;
+    let backend = _backend().await;
+    let kernels = GpuArticulationCommands::new(&backend).unwrap();
+    let mut scenes = [
+        _scene(false, true, true, false),
+        _scene(false, true, true, false),
+    ];
+    for scene in &mut scenes {
+        for &handle in &scene.handles {
+            let pose = *scene.bodies[handle].position();
+            scene.bodies[handle].set_position(
+                Pose::from_parts(pose.translation - _v(0.0, 1.88), pose.rotation),
+                true,
+            );
+        }
+    }
+    let (mut state, pipeline) = _state(&backend, &scenes, -9.81, 32);
+    for _ in 0..4 {
+        pipeline.step(&backend, &mut state, None).unwrap();
+    }
+    let before = _read(&backend, state.multibodies().contact_constraints()).await;
+    assert!(
+        before
+            .iter()
+            .any(|contact| contact.kind != 0 && contact.impulse > 0.0)
+    );
+    let infos = _read(&backend, state.multibodies().multibody_info()).await;
+    let storage = BufferUsages::STORAGE;
+    let mask = Tensor::vector(&backend, &[0u32, 1], storage).unwrap();
+    let root = Pose::from_translation(_v(0.0, 3.0));
+    let roots = Tensor::vector(&backend, &[root; 2], storage).unwrap();
+    let dofs = state.multibodies().dofs_per_batch() as usize * 2;
+    let coords = Tensor::vector(&backend, vec![0.0; dofs], storage).unwrap();
+    let vels = Tensor::vector(&backend, vec![0.0; dofs], storage).unwrap();
+    let mut encoder = backend.begin_encoding();
+    state
+        .encode_articulation_reset(&mut encoder, &kernels, &mask, &roots, &coords, &vels)
+        .unwrap();
+    backend.submit(encoder).unwrap();
+    let after = _read(&backend, state.multibodies().contact_constraints()).await;
+    for batch in 0..2 {
+        let mb = infos[batch];
+        for index in
+            mb.contact_constraint_start..mb.contact_constraint_start + mb.contact_constraint_count
+        {
+            if batch == 1 {
+                assert_eq!(after[index as usize].kind, 0);
+                assert_eq!(after[index as usize].impulse, 0.0);
+            } else {
+                assert_eq!(
+                    bytemuck::bytes_of(&after[index as usize]),
+                    bytemuck::bytes_of(&before[index as usize])
+                );
+            }
+        }
+    }
+    for _ in 0..2 {
+        pipeline.step(&backend, &mut state, None).unwrap();
+    }
+    let contacts = _read(&backend, state.multibodies().contact_constraints()).await;
+    let infos = _read(&backend, state.multibodies().multibody_info()).await;
+    assert_eq!(infos[1].contact_constraint_count, 0);
+    assert!(
+        contacts
+            .iter()
+            .any(|contact| contact.kind != 0 && contact.impulse > 0.0)
+    );
 }
 
 #[futures_test::test]

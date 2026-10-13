@@ -653,7 +653,7 @@ impl GpuMultibodySet {
             joint_constraints: Tensor::vector(
                 backend,
                 vec![MultibodyJointConstraint::default(); (cons_cap * num_batches) as usize],
-                storage,
+                storage | BufferUsages::COPY_SRC,
             )
             .unwrap(),
             joint_constraint_columns: Tensor::vector(

@@ -5,6 +5,10 @@ use crate::math::Pose;
 use crate::shaders::dynamics::{
     GpuMbJointCommands, GpuMbMotorCommands, GpuMbPublishResetState, GpuMbResetState, Velocity,
 };
+use crate::shaders::dynamics::{
+    GpuMbResetColliderPoses, GpuMbResetHistory, GpuMbResetRigidContactHistory,
+    GpuMbResetSolverState,
+};
 use crate::shaders::utils::BatchIndices;
 use khal::Shader;
 use khal::backend::{Encoder, GpuBackend, GpuBackendError, GpuEncoder};
@@ -22,9 +26,35 @@ pub struct GpuArticulationCommands {
     joints: GpuMbJointCommands,
     reset: GpuMbResetState,
     publish: GpuMbPublishResetState,
+    history: GpuMbResetHistory,
+    pub(crate) rigid_history: GpuMbResetRigidContactHistory,
+    pub(crate) solver_state: GpuMbResetSolverState,
+    pub(crate) collider_poses: GpuMbResetColliderPoses,
 }
 
 impl GpuArticulationCommands {
+    pub(crate) fn _encode_reset_history(
+        &self,
+        encoder: &mut GpuEncoder,
+        mb: &mut GpuMultibodySet,
+        selected: &Tensor<u32>,
+        batch_indices: &Tensor<BatchIndices>,
+    ) -> Result<(), GpuBackendError> {
+        let mut pass = encoder.begin_pass("[RBD] mb/reset-history", None);
+        self.history.call(
+            &mut pass,
+            mb.num_active_multibodies * mb.num_batches,
+            selected,
+            &mut mb.multibody_info,
+            &mut mb.joint_constraints,
+            &mut mb.contact_constraints,
+            &mut mb.old_contact_constraints,
+            &mut mb.mb_imp_joint_constraints,
+            &mut mb.motor_delay_state,
+            &mut mb.contact_sensor_out,
+            batch_indices,
+        )
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn _encode_reset_state(
         &self,

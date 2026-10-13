@@ -2,7 +2,7 @@ use crate::dynamics::{
     ArticulationJointCommand, ArticulationMotorCommand, GpuArticulationCommands,
 };
 use crate::pipeline::RbdState;
-use khal::backend::{GpuBackendError, GpuEncoder};
+use khal::backend::{Encoder, GpuBackendError, GpuEncoder};
 use vortx::tensor::Tensor;
 
 impl RbdState {
@@ -15,6 +15,9 @@ impl RbdState {
     /// Root coordinates are ignored in favor of `roots`. In 3D, three free
     /// angular coordinates specify a scaled-axis rotation. Recording uses the
     /// persistent kernels and existing workspaces, with no uploads/readbacks.
+    /// Clears joint/contact warmstarts, sensor output, and solver increments
+    /// only in selected batches. Motor configuration and external body state
+    /// are retained. Collider world poses are refreshed in the same encoder.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_articulation_reset(
         &mut self,
@@ -43,6 +46,49 @@ impl RbdState {
             velocities,
             &mut self.body_poses,
             &mut self.vels,
+        )?;
+        kernels._encode_reset_history(
+            encoder,
+            &mut self.multibodies,
+            selected,
+            &self.batch_indices,
+        )?;
+        let mut pass = encoder.begin_pass("[RBD] mb/reset-published-state", None);
+        kernels.rigid_history.call(
+            &mut pass,
+            self.old_constraints.len() as u32,
+            selected,
+            &mut self.old_constraints,
+            &self.batch_indices,
+        )?;
+        kernels.rigid_history.call(
+            &mut pass,
+            self.new_constraints.len() as u32,
+            selected,
+            &mut self.new_constraints,
+            &self.batch_indices,
+        )?;
+        kernels.solver_state.call(
+            &mut pass,
+            self.num_active_bodies * self.num_batches,
+            selected,
+            &self.body_poses,
+            &self.vels,
+            &self.local_mprops,
+            &mut self.solver_body_poses,
+            &mut self.solver_vels,
+            &mut self.solver_vels_inc,
+            &self.batch_indices,
+        )?;
+        kernels.collider_poses.call(
+            &mut pass,
+            self.num_active_colliders * self.num_batches,
+            selected,
+            &self.body_poses,
+            &self.collider_local_poses,
+            &self.collider_parent,
+            &mut self.collider_world_poses,
+            &self.batch_indices,
         )
     }
     /// Record GPU-resident motor target updates. See
