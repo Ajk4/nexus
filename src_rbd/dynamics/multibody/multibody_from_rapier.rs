@@ -474,6 +474,20 @@ impl GpuMultibodySet {
                      (batched envs must have identical topology)"
                 );
             }
+            for (i, (link, reference)) in per_env_links_static[b]
+                .iter()
+                .zip(&per_env_links_static[0])
+                .enumerate()
+            {
+                assert!(
+                    link.parent_link_id == reference.parent_link_id
+                        && link.multibody_id == reference.multibody_id
+                        && link.assembly_id == reference.assembly_id
+                        && link.ndofs == reference.ndofs
+                        && link.data.locked_axes == reference.data.locked_axes,
+                    "batch {b} link {i}: articulation topology differs from batch 0"
+                );
+            }
         }
 
         for i in 0..num_batches as usize {

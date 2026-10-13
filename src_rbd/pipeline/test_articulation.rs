@@ -201,6 +201,64 @@ async fn _poses(backend: &GpuBackend, state: &RbdState) -> Vec<Pose> {
 }
 
 #[futures_test::test]
+#[should_panic(expected = "articulation topology differs")]
+async fn articulation_batch_rejects_different_connections() {
+    let backend = _backend().await;
+    let a = _scene(false, false, false, false);
+    let mut b = _scene(false, false, false, false);
+    b.mb = MultibodyJointSet::new();
+    b.mb.insert(b.handles[0], b.handles[1], _hinge(), true)
+        .unwrap();
+    b.mb.insert(
+        b.handles[0],
+        b.handles[2],
+        PrismaticJointBuilder::new(Vector::X),
+        true,
+    )
+    .unwrap();
+    _state(&backend, &[a, b], 0., 32);
+}
+
+#[futures_test::test]
+#[should_panic(expected = "articulation topology differs")]
+async fn articulation_batch_rejects_different_joint_axes() {
+    let backend = _backend().await;
+    let a = _scene(false, false, false, false);
+    let mut b = _scene(false, false, false, false);
+    b.mb = MultibodyJointSet::new();
+    b.mb.insert(
+        b.handles[0],
+        b.handles[1],
+        PrismaticJointBuilder::new(Vector::X),
+        true,
+    )
+    .unwrap();
+    b.mb.insert(b.handles[1], b.handles[2], _hinge(), true)
+        .unwrap();
+    _state(&backend, &[a, b], 0., 32);
+}
+
+#[futures_test::test]
+async fn articulation_batch_accepts_different_physical_parameters() {
+    let backend = _backend().await;
+    let a = _scene(false, true, false, false);
+    let mut b = _scene(false, false, false, false);
+    for (_, body) in b.bodies.iter_mut() {
+        body.set_translation(body.translation() + _v(2., 3.), false);
+        body.set_linvel(_v(0.2, -0.3), false);
+        body.set_additional_mass(0.7, false);
+    }
+    let (mut state, pipeline) = _state(&backend, &[a, b], 0., 32);
+    pipeline.step(&backend, &mut state, None).unwrap();
+    assert!(
+        _poses(&backend, &state)
+            .await
+            .iter()
+            .all(|p| p.translation.is_finite())
+    );
+}
+
+#[futures_test::test]
 async fn articulation_gpu_control_commands() {
     use crate::dynamics::{
         ArticulationJointCommand, ArticulationMotorCommand, ArticulationMotorTarget,
