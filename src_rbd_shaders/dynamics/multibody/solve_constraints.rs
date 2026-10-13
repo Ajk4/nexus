@@ -282,6 +282,7 @@ pub fn gpu_mb_solve_constraints(
                 j_dot_v0 += scratch._load(i as usize);
             }
         }
+        #[cfg(feature = "dim3")]
         workgroup_memory_barrier_with_group_sync();
 
         if solve && has_pair {
@@ -294,6 +295,7 @@ pub fn gpu_mb_solve_constraints(
                 },
             );
         }
+        #[cfg(feature = "dim3")]
         workgroup_memory_barrier_with_group_sync();
 
         if solve && lane == 0 {
