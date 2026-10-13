@@ -1170,6 +1170,39 @@ impl GpuMultibodySet {
         &self.mass_matrices
     }
 
+    #[cfg(test)]
+    pub(crate) fn _core_allocation_sizes(&self) -> [(&'static str, usize); 8] {
+        use core::mem::size_of;
+        [
+            (
+                "links",
+                self.links_static.len() as usize * size_of::<MultibodyLinkStatic>(),
+            ),
+            (
+                "workspace",
+                self.links_workspace.len() as usize * size_of::<glamx::Vec4>(),
+            ),
+            (
+                "dof_state",
+                self.dof_state.len() as usize * size_of::<f32>(),
+            ),
+            ("forces", self.gen_forces.len() as usize * size_of::<f32>()),
+            (
+                "jacobians",
+                self.body_jacobians.len() as usize * size_of::<f32>(),
+            ),
+            (
+                "mass_matrices",
+                self.mass_matrices.len() as usize * size_of::<f32>(),
+            ),
+            (
+                "coriolis",
+                self.coriolis_packed.len() as usize * size_of::<f32>(),
+            ),
+            ("pivots", self.lu_pivots.len() as usize * size_of::<u32>()),
+        ]
+    }
+
     /// Reads back the generalized coordinate of every DoF of batch `batch_id`,
     /// in assembly order (the same order as [`Self::dof_state`]'s velocity
     /// section). The coordinates live in the link workspace, so this unpacks the

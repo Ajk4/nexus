@@ -302,7 +302,92 @@ async fn articulation_contacts_and_external_joints() {
                     p.translation.y
                 );
             }
+            // Sliding must produce opposing friction on the articulation.
+            backend
+                .write_buffer(
+                    state.multibodies_mut().dof_state_mut().buffer_mut(),
+                    0,
+                    &[2.0_f32],
+                )
+                .unwrap();
+            for _ in 0..90 {
+                pipeline.step(&backend, &mut state, None).unwrap();
+            }
+            backend.synchronize().unwrap();
+            let dofs: Vec<f32> = backend
+                .slow_read_vec(state.multibodies().dof_state().buffer())
+                .await
+                .unwrap();
+            assert!(
+                (0.0..1.8).contains(&dofs[0]),
+                "friction left root velocity {}",
+                dofs[0]
+            );
         }
+    }
+}
+
+#[cfg(feature = "dim2")]
+#[futures_test::test]
+async fn articulation_planar_rotation_and_wrench() {
+    let backend = _backend().await;
+    let mut scenes = [_scene(false, false, false, false)];
+    let root = scenes[0].handles[0];
+    scenes[0].bodies[root].set_rotation(glamx::Rot2::from_angle(0.4), true);
+    let (mut state, pipeline) = _state(&backend, &scenes, 0.0);
+    pipeline.step(&backend, &mut state, None).unwrap();
+    let poses = _poses(&backend, &state).await;
+    for p in poses.iter().take(3) {
+        assert!((p.rotation.angle() - 0.4).abs() < 1.0e-5);
+    }
+    state
+        .multibodies_mut()
+        .set_link_external_wrench(&backend, 0, 0, 0, _v(3.0, 0.0), 1.0, 0.0)
+        .unwrap();
+    for _ in 0..30 {
+        pipeline.step(&backend, &mut state, None).unwrap();
+    }
+    let moved = _poses(&backend, &state).await;
+    assert!(moved[0].rotation.angle() > poses[0].rotation.angle());
+    let com = |p: &[Pose]| p[..3].iter().map(|p| p.translation).sum::<Vector>() / 3.0;
+    assert!(com(&moved).x > com(&poses).x + 0.0005);
+}
+
+#[futures_test::test]
+#[ignore = "short throughput and allocation probe"]
+async fn articulation_benchmark() {
+    let backend = _backend().await;
+    for batches in [1, 8, 64, 256] {
+        let scenes: Vec<_> = (0..batches)
+            .map(|_| _scene(false, true, false, false))
+            .collect();
+        let (mut state, pipeline) = _state(&backend, &scenes, 0.0);
+        for _ in 0..2 {
+            pipeline.step(&backend, &mut state, None).unwrap();
+        }
+        backend.synchronize().unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            pipeline.step(&backend, &mut state, None).unwrap();
+        }
+        backend.synchronize().unwrap();
+        let seconds = start.elapsed().as_secs_f64();
+        let allocations = state.multibodies()._core_allocation_sizes();
+        let bytes: usize = allocations.iter().map(|(_, bytes)| bytes).sum();
+        let infos: Vec<crate::shaders::dynamics::MultibodyInfo> = backend
+            .slow_read_vec(state.multibodies().multibody_info().buffer())
+            .await
+            .unwrap();
+        let ndofs = infos[0].ndofs;
+        let poses = _poses(&backend, &state).await;
+        assert!(poses.iter().all(|p| p.translation.is_finite()));
+        eprintln!(
+            "dim={} batches={batches} dofs={ndofs} jacobian={}x{ndofs} core_bytes={bytes} allocations={allocations:?} ms_per_step={:.3} env_steps_per_second={:.0}",
+            crate::math::DIM,
+            crate::shaders::dynamics::SPATIAL_DIM,
+            seconds * 100.0,
+            batches as f64 * 10.0 / seconds
+        );
     }
 }
 
