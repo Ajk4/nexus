@@ -1,13 +1,15 @@
-//! Reduced-coordinates articulated multibody (3D).
+//! Native reduced-coordinate articulations in 2D and 3D.
 //!
-//! GPU port of rapier's `Multibody`, restricted to:
+//! GPU port of rapier's `Multibody`, supporting:
 //! - Forward kinematics (link world transforms from generalized coordinates).
-//! - Body jacobians (one `6 × ndofs` per link).
+//! - Body jacobians (one `SPATIAL_DIM × ndofs` per link).
 //! - Augmented mass matrix via CRBA: `M = Σ Jᵢᵀ Mᵢ Jᵢ`.
 //! - Gravity generalized force: `τ = Σ Jᵢᵀ (mᵢ g, 0)`.
 //! - In-place LU solve of `M ẍ = τ`.
 //!
-//! No constraints, contacts, or Coriolis terms (not in scope).
+//! Motors, limits, contacts, external impulse joints, and Coriolis dynamics
+//! share dimension-generic algorithms. Planar angular quantities are scalars;
+//! no planar state is embedded in a 3D solver.
 //!
 //! Links and multibodies are stored flat across all simulation batches. Each
 //! batch has a capacity; unused slots are padded out and skipped via per-batch

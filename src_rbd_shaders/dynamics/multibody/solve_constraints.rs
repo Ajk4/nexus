@@ -361,7 +361,9 @@ pub fn gpu_mb_solve_constraints(
             }
             deltas_shared.write(0, delta0);
             #[cfg(feature = "dim3")]
-            { deltas_shared.write(1, delta1); }
+            {
+                deltas_shared.write(1, delta1);
+            }
 
             if !is_self && (delta0 != 0.0 || delta1 != 0.0) {
                 let mut new_free = free;

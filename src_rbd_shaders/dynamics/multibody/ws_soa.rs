@@ -179,7 +179,11 @@ pub fn ws_vec(buf: &[Vec4], a: WsAddr, k: u32, f: u32) -> Vector {
 #[inline]
 pub fn ws_vec(buf: &[Vec4], a: WsAddr, k: u32, f: u32) -> Vector {
     let q = buf.read(a.at(k, f & 0xffff));
-    if f & (1 << 16) != 0 { Vec2::new(q.z, q.w) } else { Vec2::new(q.x, q.y) }
+    if f & (1 << 16) != 0 {
+        Vec2::new(q.z, q.w)
+    } else {
+        Vec2::new(q.x, q.y)
+    }
 }
 
 #[cfg(feature = "dim3")]

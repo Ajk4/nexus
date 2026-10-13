@@ -1,3 +1,11 @@
+## Unreleased
+
+- Native 2D reduced-coordinate articulations through `nexus_rbd2d`, including
+  floating/fixed roots, motors, limits, contacts, external joints, and selective resets.
+  Planar Jacobians have three rows; angular velocity and inertia are scalars.
+- Fix joint-constraint lane synchronization on CPU/GPU and enable GPU snapshot
+  readback of multibody link configuration and generalized velocities.
+
 ## v0.5.0 (16 August 2026)
 
 ### Breaking changes
