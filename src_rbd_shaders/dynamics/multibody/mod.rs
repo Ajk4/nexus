@@ -16,7 +16,6 @@
 mod compute_dynamics_pre;
 mod contact_constraints;
 mod contact_sensor;
-#[cfg(feature = "dim3")]
 mod env_reset;
 mod gravity_and_lu;
 mod impulse_joint_constraints;
@@ -33,7 +32,6 @@ mod ws_soa;
 pub use compute_dynamics_pre::*;
 pub use contact_constraints::*;
 pub use contact_sensor::*;
-#[cfg(feature = "dim3")]
 pub use env_reset::*;
 pub use gravity_and_lu::*;
 pub use impulse_joint_constraints::*;

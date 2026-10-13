@@ -87,7 +87,10 @@ impl GpuMultibodySnapshot {
                 ws.local_to_parent.translation += offset;
                 ws.coords[0] += offset.x;
                 ws.coords[1] += offset.y;
-                ws.coords[2] += offset.z;
+                #[cfg(feature = "dim3")]
+                {
+                    ws.coords[2] += offset.z;
+                }
             }
         }
         out

@@ -12,6 +12,46 @@ use khal_std::macros::{spirv, spirv_bindgen};
 use super::types::MultibodyLinkStatic;
 use super::ws_soa::{WS_COORDS, WS_LTP, WS_LTW, WS_QUADS};
 
+#[cfg(all(test, feature = "dim2"))]
+#[test]
+fn reset_translation_preserves_planar_rotation() {
+    let mut template = [Vec4::ZERO; WS_QUADS as usize];
+    template[WS_COORDS as usize] = Vec4::new(1.0, 2.0, 0.7, 0.0);
+    template[WS_LTP as usize] = Vec4::new(0.8, 0.6, 1.0, 2.0);
+    template[WS_LTW as usize] = template[WS_LTP as usize];
+    let mut live = [Vec4::ZERO; 2 * WS_QUADS as usize];
+    for i in 0..WS_QUADS {
+        gpu_mb_env_reset_batch(
+            UVec3::new(i, 0, 0),
+            &template,
+            &[3],
+            &[EnvResetRecord {
+                env: 1,
+                template: 0,
+            }],
+            &[Vec4::new(4.0, -3.0, 9.0, 0.0)],
+            &mut live,
+            &MbEnvResetBatchParams {
+                num_batches: 2,
+                links_per_batch: 1,
+                dofs_per_batch: 3,
+                num_resets: 1,
+            },
+        );
+    }
+    assert_eq!(
+        live[WS_COORDS as usize + WS_QUADS as usize],
+        Vec4::new(5.0, -1.0, 0.7, 0.0)
+    );
+    for q in [WS_LTP, WS_LTW] {
+        assert_eq!(
+            live[(WS_QUADS + q) as usize],
+            Vec4::new(0.8, 0.6, 5.0, -1.0)
+        );
+    }
+    assert!(live[..WS_QUADS as usize].iter().all(|v| *v == Vec4::ZERO));
+}
+
 /// One entry of the batched-reset list: restore environment `env` from the
 /// GPU-resident template `template`.
 #[derive(Copy, Clone, Default)]
@@ -162,18 +202,28 @@ pub fn gpu_mb_env_reset_batch(
         let link = i / WS_QUADS;
         let q = i % WS_QUADS;
         let f = link_flags.read(link as usize);
-        // `WS_LTW` and `WS_LTP` are rot|trans quad pairs, so `+1` is the
-        // translation quad. Coords c0..c3 share quad `WS_COORDS` (c3 is a
-        // rotational DoF, never offset, so its `.w` lane stays untouched).
-        if f & 1 != 0 && q == WS_LTW + 1 {
-            v.x += off.x;
-            v.y += off.y;
-            v.z += off.z;
+        #[cfg(feature = "dim3")]
+        {
+            // 3D poses occupy a rotation quad followed by a translation quad.
+            if (f & 1 != 0 && q == WS_LTW + 1)
+                || (f & 2 != 0 && (q == WS_LTP + 1 || q == WS_COORDS))
+            {
+                v.x += off.x;
+                v.y += off.y;
+                v.z += off.z;
+            }
         }
-        if f & 2 != 0 && (q == WS_LTP + 1 || q == WS_COORDS) {
-            v.x += off.x;
-            v.y += off.y;
-            v.z += off.z;
+        #[cfg(feature = "dim2")]
+        {
+            // 2D poses pack rotation and translation in one quad.
+            if (f & 1 != 0 && q == WS_LTW) || (f & 2 != 0 && q == WS_LTP) {
+                v.z += off.x;
+                v.w += off.y;
+            }
+            if f & 2 != 0 && q == WS_COORDS {
+                v.x += off.x;
+                v.y += off.y;
+            }
         }
         // Live workspace is interleaved at per-link-record granularity.
         links_workspace.write(((link * nb + env) * WS_QUADS + q) as usize, v);
@@ -269,7 +319,10 @@ pub fn gpu_env_reset_bodies(
         if body_mask.read(i as usize) != 0 {
             p.translation.x += off.x;
             p.translation.y += off.y;
-            p.translation.z += off.z;
+            #[cfg(feature = "dim3")]
+            {
+                p.translation.z += off.z;
+            }
         }
         body_poses.write((i * nb + env) as usize, p);
     }

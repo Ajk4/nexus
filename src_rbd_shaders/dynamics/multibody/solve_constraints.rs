@@ -195,7 +195,6 @@ pub fn gpu_mb_solve_constraints(
                 new_imp = cons.impulse_hi;
             }
             delta = new_imp - cons.impulse;
-
         }
 
         // All lanes read `dof_v.read(dof_id)` above; sync before overwriting it.
@@ -486,7 +485,6 @@ pub fn gpu_mb_solve_joints(
                 new_imp = cons.impulse_hi;
             }
             delta = new_imp - cons.impulse;
-
         }
 
         workgroup_memory_barrier_with_group_sync();
