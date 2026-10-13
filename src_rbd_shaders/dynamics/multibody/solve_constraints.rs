@@ -206,9 +206,7 @@ pub fn gpu_mb_solve_constraints(
         workgroup_memory_barrier_with_group_sync();
         // All lanes must read the old impulse before lane 0 publishes the new one.
         if solve && lane == 0 {
-            let mut updated = cons;
-            updated.impulse = cons.impulse + delta;
-            joint_constraints.write(jcons_base + s as usize, updated);
+            joint_constraints.at_mut(jcons_base + s as usize).impulse = cons.impulse + delta;
         }
         if solve && lane < ndofs {
             let col = joint_constraint_columns.read(
@@ -507,9 +505,7 @@ pub fn gpu_mb_solve_joints(
         workgroup_memory_barrier_with_group_sync();
         // All lanes must read the old impulse before lane 0 publishes the new one.
         if solve && lane == 0 {
-            let mut updated = cons;
-            updated.impulse = cons.impulse + delta;
-            joint_constraints.write(jcons_base + s as usize, updated);
+            joint_constraints.at_mut(jcons_base + s as usize).impulse = cons.impulse + delta;
         }
         if solve && lane < ndofs {
             let col = joint_constraint_columns.read(
