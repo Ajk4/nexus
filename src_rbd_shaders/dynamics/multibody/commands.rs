@@ -20,6 +20,7 @@ pub struct ArticulationMotorTarget {
 
 /// One selected batch/link, with a mask of motor axes to update.
 /// Link ids use the articulation traversal order, not rigid-body ids.
+/// `axes == 0` marks an inactive slot in a persistent command buffer.
 #[derive(Clone, Copy, Default)]
 #[cfg_attr(not(target_arch_is_gpu), derive(bytemuck::Pod, bytemuck::Zeroable))]
 #[repr(C)]
@@ -33,6 +34,8 @@ pub struct ArticulationMotorCommand {
 
 /// Update an existing external joint, preserving topology and solver coloring.
 /// `joint` is the source impulse-joint id (`MbImpulseJointBuilder::joint_id`).
+/// This id is assigned before color sorting; it is not a Rapier handle or a
+/// sorted builder slot. `joint == u32::MAX` marks an inactive command slot.
 /// Frame conventions match the resident builders: body-origin local space
 /// for an articulation link, COM-local space for a free body, and world space
 /// for a fixed side (whose body transform is already folded into the frame).
@@ -61,6 +64,9 @@ pub fn gpu_mb_motor_commands(
         return;
     }
     let command = commands.read(id.x as usize);
+    if command.axes == 0 {
+        return;
+    }
     let index = batch_ids.mbi(command.batch, command.link as usize);
     let mut link = links.read(index);
     for axis in 0..SPATIAL_DIM {
@@ -87,6 +93,9 @@ pub fn gpu_mb_joint_commands(
         return;
     }
     let command = commands.read(id.x as usize);
+    if command.joint == u32::MAX {
+        return;
+    }
     for joint in 0..batch_ids.mb_imp_joints_batch_capacity {
         let index = batch_ids.mbi(command.batch, joint as usize);
         let mut builder = builders.read(index);

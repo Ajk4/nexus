@@ -225,18 +225,37 @@ async fn articulation_gpu_control_commands() {
         position: -0.25,
         velocity: -0.4,
     };
-    let motors = Tensor::vector(&backend, &[motor], BufferUsages::STORAGE).unwrap();
+    let motors = Tensor::vector(
+        &backend,
+        &[
+            motor,
+            ArticulationMotorCommand {
+                batch: u32::MAX,
+                link: u32::MAX,
+                ..Default::default()
+            },
+        ],
+        BufferUsages::STORAGE,
+    )
+    .unwrap();
     let old = _read(&backend, state.multibodies().impulse_joint_builders()).await;
     let joints = Tensor::vector(
         &backend,
-        &[ArticulationJointCommand {
-            batch: 1,
-            joint: old[1].joint_id,
-            locked_axes: 0,
-            frame_a: Pose::from_translation(_v(0.1, 0.2)),
-            frame_b: Pose::from_translation(_v(-0.1, -0.2)),
-            _padding: 0,
-        }],
+        &[
+            ArticulationJointCommand {
+                batch: 1,
+                joint: old[1].joint_id,
+                locked_axes: 0,
+                frame_a: Pose::from_translation(_v(0.1, 0.2)),
+                frame_b: Pose::from_translation(_v(-0.1, -0.2)),
+                _padding: 0,
+            },
+            ArticulationJointCommand {
+                batch: u32::MAX,
+                joint: u32::MAX,
+                ..Default::default()
+            },
+        ],
         BufferUsages::STORAGE,
     )
     .unwrap();
