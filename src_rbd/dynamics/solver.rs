@@ -5,12 +5,10 @@
 //! `Soft-TGS` algorithm (as in Rapier).
 
 use crate::dynamics::joint::{GpuJointSolver, JointSolverArgs};
-#[cfg(feature = "dim3")]
 use crate::dynamics::multibody::{GpuMultibodySet, GpuMultibodySolver, MultibodySolverArgs};
 use crate::math::Pose;
 use crate::queries::GpuIndexedContact;
 use crate::shaders::broad_phase::ContactPlan;
-#[cfg(feature = "dim3")]
 use crate::shaders::dynamics::MbContactIndexEntry;
 use crate::shaders::dynamics::{
     GpuApplySolverVelsInc, GpuInitSolverBodies, GpuInitSolverVelsInc, GpuIntegrateLinearized,
@@ -84,7 +82,6 @@ pub struct SolverArgs<'a> {
     pub contact_plan: &'a Tensor<ContactPlan>,
     /// Contact→multibody index storage, rebuilt each step by
     /// `GpuMultibodySolver::layout_contact_constraints`.
-    #[cfg(feature = "dim3")]
     pub mb_contact_index: &'a mut Tensor<MbContactIndexEntry>,
     /// Flat dispatch grid over the whole contacts range.
     pub contacts_len_indirect: &'a Tensor<[u32; 3]>,
@@ -262,10 +259,9 @@ impl GpuSolver {
         joint_solver: &GpuJointSolver,
         args: SolverArgs<'a>,
         mut joint_args: JointSolverArgs<'a>,
-        #[cfg(feature = "dim3")] multibody: Option<(&GpuMultibodySolver, &mut GpuMultibodySet)>,
+        multibody: Option<(&GpuMultibodySolver, &mut GpuMultibodySet)>,
     ) -> Result<(), GpuBackendError> {
         let num_substeps = args.num_solver_iterations;
-        #[cfg(feature = "dim3")]
         let (mb_solver, mut mb_state) = match multibody {
             Some((s, st)) => (Some(s), Some(st)),
             None => (None, None),
@@ -296,7 +292,6 @@ impl GpuSolver {
             // Lay out the multibody contact-constraint segments and the
             // contact→multibody index, after the narrow phase and before the
             // first substep build.
-            #[cfg(feature = "dim3")]
             if let (Some(solver), Some(state)) = (mb_solver, mb_state.as_deref_mut()) {
                 let mut mb_args = MultibodySolverArgs {
                     poses: &mut *args.solver_body_poses,
@@ -322,7 +317,6 @@ impl GpuSolver {
         // phase.
         macro_rules! mb_phase {
             ($label:expr, $method:ident $(, $extra:expr)*) => {{
-                #[cfg(feature = "dim3")]
                 if let (Some(solver), Some(state)) = (mb_solver, mb_state.as_deref_mut()) {
                     let mut pass = encoder.begin_pass($label, timestamps.as_deref_mut());
                     let mut mb_args = MultibodySolverArgs {
@@ -346,9 +340,6 @@ impl GpuSolver {
 
         for substep_id in 0..num_substeps {
             let is_last_substep = substep_id == num_substeps - 1;
-            // Only consumed by the dim3-only multibody phases.
-            #[cfg(not(feature = "dim3"))]
-            let _ = is_last_substep;
 
             /*
              * Integrate velocities (apply `a · dt'` / gravity increment).
@@ -370,7 +361,6 @@ impl GpuSolver {
              * Build + warmstart constraints.
              */
             {
-                #[cfg(feature = "dim3")]
                 if let (Some(solver), Some(state)) = (mb_solver, mb_state.as_deref_mut()) {
                     let mut mb_args = MultibodySolverArgs {
                         poses: &mut *args.solver_body_poses,

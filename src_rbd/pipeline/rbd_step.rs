@@ -1,7 +1,6 @@
 //! The [`RbdPipeline`] running one full simulation step on the GPU.
 
 use crate::broad_phase::{BRUTE_FORCE_MAX_COLLIDERS, GpuNarrowPhase, Lbvh};
-#[cfg(feature = "dim3")]
 use crate::dynamics::GpuMultibodySolver;
 use crate::dynamics::{
     ColoringArgs, GpuColoring, GpuJointSolver, GpuMpropsUpdate, GpuSolver, GpuWarmstart,
@@ -24,7 +23,6 @@ pub struct RbdPipeline {
     narrow_phase: GpuNarrowPhase,
     solver: GpuSolver,
     joint_solver: GpuJointSolver,
-    #[cfg(feature = "dim3")]
     multibody_solver: GpuMultibodySolver,
     prefix_sum: GpuPrefixSum,
     lbvh: Lbvh,
@@ -48,7 +46,6 @@ impl RbdPipeline {
             narrow_phase: GpuNarrowPhase::from_backend(backend)?,
             solver: GpuSolver::from_backend(backend)?,
             joint_solver: GpuJointSolver::from_backend(backend)?,
-            #[cfg(feature = "dim3")]
             multibody_solver: GpuMultibodySolver::from_backend(backend)?,
             prefix_sum: GpuPrefixSum::from_backend(backend)?,
             lbvh: Lbvh::from_backend(backend),
@@ -156,7 +153,6 @@ impl RbdPipeline {
         // shared `BatchIndices` uniform describing the old buffer sizes, so
         // the kernels would index the resized buffers with stale per-batch
         // capacities. Re-upload it before anything reads it.
-        #[cfg(feature = "dim3")]
         if state.multibodies.constraint_caps_dirty {
             state.rebuild_batch_indices(backend);
             state.multibodies.constraint_caps_dirty = false;
@@ -167,7 +163,6 @@ impl RbdPipeline {
         {
             let mut needed = state.max_colors + 2;
             needed = needed.max(state.joints.num_colors() + 1);
-            #[cfg(feature = "dim3")]
             {
                 needed = needed.max(state.multibodies.mb_imp_joint_num_colors() + 1);
             }
@@ -175,7 +170,6 @@ impl RbdPipeline {
         }
 
         // Phase 0: Multibody once-per-visible-step setup (3D only for now).
-        #[cfg(feature = "dim3")]
         {
             if !state.multibodies.is_empty() {
                 let mut args = crate::dynamics::MultibodySolverArgs {
@@ -363,7 +357,6 @@ impl RbdPipeline {
             let prepare_args = SolverArgs {
                 contacts: &state.contacts,
                 contact_plan: &state.contact_plan,
-                #[cfg(feature = "dim3")]
                 mb_contact_index: &mut state.mb_contact_index,
                 contacts_len_indirect: &state.contacts_indirect,
                 constraints: &mut state.new_constraints,
@@ -514,7 +507,6 @@ impl RbdPipeline {
         let solver_args = SolverArgs {
             contacts: &state.contacts,
             contact_plan: &state.contact_plan,
-            #[cfg(feature = "dim3")]
             mb_contact_index: &mut state.mb_contact_index,
             contacts_len_indirect: &state.contacts_indirect,
             constraints: &mut state.new_constraints,
@@ -544,10 +536,7 @@ impl RbdPipeline {
             mb_sweep_indirect: &state.mb_sweep_indirect,
             // The gather warmstart is only valid without multibody grouping;
             // see `SolverArgs::colorless_warmstart`.
-            #[cfg(feature = "dim3")]
             colorless_warmstart: state.multibodies.is_empty(),
-            #[cfg(not(feature = "dim3"))]
-            colorless_warmstart: true,
             fused_color_sweeps,
             rb_contacts_inert: state.rb_contacts_inert,
             gravity: &state.gravity,
@@ -565,7 +554,6 @@ impl RbdPipeline {
         };
 
         {
-            #[cfg(feature = "dim3")]
             let mb = if state.multibodies.is_empty() {
                 None
             } else {
@@ -577,7 +565,6 @@ impl RbdPipeline {
                 &self.joint_solver,
                 solver_args,
                 joint_solver_args,
-                #[cfg(feature = "dim3")]
                 mb,
             )?;
 
@@ -646,11 +633,8 @@ impl RbdPipeline {
 
         // The readback holds `[total collision-pair count, total PFM-pair
         // count, uncolored count]` (+ the multibody contact-constraint demand
-        // on dim3).
-        #[cfg(feature = "dim3")]
+        // for multibodies).
         let mut counts = [0u32; 4];
-        #[cfg(not(feature = "dim3"))]
-        let mut counts = [0u32; 3];
         if state.resize_readback.try_take(backend, &mut counts) {
             // TODO: make the coloring update optional (and pre-configurable) too?
             // The flat pair and PFM work-lists share one buffer capacity, so
@@ -685,7 +669,6 @@ impl RbdPipeline {
                 RbdResizePolicy::Fit => safe_total >= total_capacity || total_capacity >= new_total,
             };
 
-            #[cfg(feature = "dim3")]
             let (resize_mb, new_mb) = {
                 let mb_demand = counts[3];
                 state.mb_cons_demand_cpu = mb_demand;
@@ -707,8 +690,6 @@ impl RbdPipeline {
                 };
                 (resize_mb, new_mb)
             };
-            #[cfg(not(feature = "dim3"))]
-            let resize_mb = false;
 
             if grow_colors || resize_pairs || resize_mb {
                 backend.synchronize()?;
@@ -750,7 +731,6 @@ impl RbdPipeline {
                 // `2 ×` the pair/PFM capacity.
                 let new_contacts = new_total * 2;
                 state.contacts = Tensor::vector_uninit(backend, new_contacts, storage)?;
-                #[cfg(feature = "dim3")]
                 {
                     state.mb_contact_index = Tensor::vector_uninit(backend, new_contacts, storage)?;
                 }
@@ -782,7 +762,6 @@ impl RbdPipeline {
                 state.contacts_capacity_cpu = new_contacts;
             }
             // Multibody contact-constraint slots: flat and demand-sized.
-            #[cfg(feature = "dim3")]
             if resize_mb {
                 state.multibodies.resize_contact_slabs(backend, new_mb);
             }
@@ -792,7 +771,6 @@ impl RbdPipeline {
         }
 
         if readback_enabled && state.resize_readback.is_idle() {
-            #[cfg(feature = "dim3")]
             state.resize_readback.request(
                 backend,
                 &[
@@ -800,15 +778,6 @@ impl RbdPipeline {
                     (state.pfm_pairs_len.buffer(), 0, 1),
                     (state.uncolored.buffer(), 0, 1),
                     (state.multibodies.mb_cons_demand().buffer(), 0, 1),
-                ],
-            )?;
-            #[cfg(not(feature = "dim3"))]
-            state.resize_readback.request(
-                backend,
-                &[
-                    (state.collision_pairs_len.buffer(), 0, 1),
-                    (state.pfm_pairs_len.buffer(), 0, 1),
-                    (state.uncolored.buffer(), 0, 1),
                 ],
             )?;
         }

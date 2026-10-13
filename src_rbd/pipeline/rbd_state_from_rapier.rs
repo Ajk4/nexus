@@ -2,7 +2,6 @@
 
 use crate::broad_phase::{LbvhState, PfmSortState};
 use crate::dynamics::GpuImpulseJointSet;
-#[cfg(feature = "dim3")]
 use crate::dynamics::GpuMultibodySet;
 use crate::math::{Pose, Vector};
 use crate::queries::GpuColliderMaterial;
@@ -124,7 +123,6 @@ impl RbdState {
                         None => parentless += 1,
                     }
                 }
-                #[cfg(feature = "dim3")]
                 for mb in mbj.multibodies() {
                     for link in mb.links() {
                         parents.insert(link.rigid_body_handle());
@@ -181,7 +179,6 @@ impl RbdState {
         // solver-iteration count (and 4, the default, when there are none).
         let num_solver_iterations = sim_params.num_solver_iterations;
         // Pick representative dt (outer dt, not the per-substep one) from any batch.
-        #[cfg(feature = "dim3")]
         let multibody_dt = environments
             .first()
             .map(|(_, _, _, _, sp)| sp.dt)
@@ -192,14 +189,12 @@ impl RbdState {
         let dummy_local_mprops = GpuLocalMassProperties::default();
         let dummy_mprops = GpuWorldMassProperties::default();
 
-        #[cfg(feature = "dim3")]
         let mut multibody_envs: Vec<(
             &MultibodyJointSet,
             HashMap<crate::rapier::dynamics::RigidBodyHandle, u32>,
             &RigidBodySet,
         )> = Vec::new();
 
-        #[cfg_attr(not(feature = "dim3"), allow(unused_variables))]
         for (bodies, colliders, impulse_joints, multibody_joints, _sim_params) in environments {
             let env_collider_count = colliders.len();
             // `body_ids` maps a rigid-body handle to its env-local body slot.
@@ -246,11 +241,7 @@ impl RbdState {
                 };
 
             // Handle bodies whose multibody disables self-contacts.
-            #[cfg(feature = "dim3")]
-            let no_self_collide: HashMap<
-                crate::rapier::dynamics::RigidBodyHandle,
-                u32,
-            > = {
+            let no_self_collide: HashMap<crate::rapier::dynamics::RigidBodyHandle, u32> = {
                 let mut map = HashMap::new();
                 for (mb_ord, mb) in multibody_joints.multibodies().enumerate() {
                     if !mb.self_contacts_enabled() {
@@ -331,13 +322,10 @@ impl RbdState {
                 all_collider_parent.push(body_local);
 
                 // Broad-phase pair-filter key.
-                #[cfg(feature = "dim3")]
                 let mb_key = co
                     .parent()
                     .and_then(|h| no_self_collide.get(&h).copied())
                     .unwrap_or(0);
-                #[cfg(feature = "dim2")]
-                let mb_key = 0u32;
                 all_pair_filter.push([body_local, mb_key]);
             }
 
@@ -346,7 +334,6 @@ impl RbdState {
             // collider-less link's FK pose would fall back to slot 0. Slots are
             // appended after the collider-parented bodies, in multibody-link
             // order; `state.rs`'s `rbd2gpu` rebuild mirrors this exact order.
-            #[cfg(feature = "dim3")]
             for mb in multibody_joints.multibodies() {
                 for link in mb.links() {
                     let h = link.rigid_body_handle();
@@ -394,7 +381,6 @@ impl RbdState {
                 all_mprops.push(dummy_mprops);
             }
 
-            #[cfg(feature = "dim3")]
             multibody_envs.push((multibody_joints, body_ids.clone(), bodies));
             joint_envs.push((impulse_joints, body_ids));
         }
@@ -443,7 +429,6 @@ impl RbdState {
         // joint touching such a body; those joints are routed to
         // `GpuMultibodySet::set_impulse_joints` instead so they go through
         // the generic `M⁻¹·Jᵀ` solver path.
-        #[cfg(feature = "dim3")]
         let (multibody_groups, is_mb_body): (Vec<Vec<u32>>, Vec<Vec<bool>>) = {
             let mut all_groups: Vec<Vec<u32>> = Vec::with_capacity(num_batches as usize);
             let mut all_is_mb: Vec<Vec<bool>> = Vec::with_capacity(num_batches as usize);
@@ -465,9 +450,6 @@ impl RbdState {
             }
             (all_groups, all_is_mb)
         };
-        #[cfg(not(feature = "dim3"))]
-        let (multibody_groups, is_mb_body): (Vec<Vec<u32>>, Vec<Vec<bool>>) =
-            (Vec::new(), Vec::new());
 
         let joints = GpuImpulseJointSet::from_rapier_filtered(
             backend,
@@ -477,7 +459,6 @@ impl RbdState {
         );
 
         // Convert multibodies (3D only).
-        #[cfg(feature = "dim3")]
         let mut multibodies = {
             let mb_refs: Vec<(
                 &MultibodyJointSet,
@@ -522,7 +503,6 @@ impl RbdState {
         // Mark multibody-controlled bodies as kinematic (inv_mass = 0) in the shared
         // body buffers so the rigid-body pipeline leaves them alone. The multibody
         // solver owns their masses internally.
-        #[cfg(feature = "dim3")]
         {
             for (batch_idx, (mb_set, body_ids, _)) in multibody_envs.iter().enumerate() {
                 let batch_offset = batch_idx * max_colliders;
@@ -531,7 +511,14 @@ impl RbdState {
                         if let Some(&rb_local_id) = body_ids.get(&link.rigid_body_handle()) {
                             let global = batch_offset + rb_local_id as usize;
                             all_local_mprops[global].inv_mass = Vector::ZERO;
-                            all_local_mprops[global].inv_principal_inertia = glamx::Vec3::ZERO;
+                            #[cfg(feature = "dim3")]
+                            {
+                                all_local_mprops[global].inv_principal_inertia = glamx::Vec3::ZERO;
+                            }
+                            #[cfg(feature = "dim2")]
+                            {
+                                all_local_mprops[global].inv_inertia = 0.0;
+                            }
                             // Multibody links must have a zero local COM in the
                             // shared body buffer: the multibody substep writes
                             // body-origin poses to `solver_body_poses`, and we
@@ -541,7 +528,7 @@ impl RbdState {
                             // as body-origin poses.
                             all_local_mprops[global].com = Vector::ZERO;
                             all_mprops[global].inv_mass = Vector::ZERO;
-                            all_mprops[global].inv_inertia = glamx::Mat4::ZERO;
+                            all_mprops[global].inv_inertia = Default::default();
                         }
                     }
                 }
@@ -575,7 +562,6 @@ impl RbdState {
                 all_body_group.push(b as u32);
             }
         }
-        #[cfg(feature = "dim3")]
         for (batch_idx, (mb_set, body_ids, _)) in multibody_envs.iter().enumerate() {
             let base = batch_idx * max_colliders;
             for mb in mb_set.multibodies() {
@@ -668,11 +654,8 @@ impl RbdState {
         )
         .unwrap();
         // Readback: pair count, PFM count, uncolored count (+ the multibody
-        // contact-constraint demand on dim3).
-        #[cfg(feature = "dim3")]
+        // contact-constraint demand).
         let resize_readback = GpuReadback::new(backend, 4).unwrap();
-        #[cfg(not(feature = "dim3"))]
-        let resize_readback = GpuReadback::new(backend, 3).unwrap();
         let collision_pairs_indirect =
             Tensor::scalar_uninit(backend, BufferUsages::STORAGE | BufferUsages::INDIRECT).unwrap();
 
@@ -682,7 +665,6 @@ impl RbdState {
         let pairs_capacity = capacities.collisions_capacity * num_batches;
         let contacts_capacity = pairs_capacity * 2;
         let contacts = Tensor::vector_uninit(backend, contacts_capacity, storage).unwrap();
-        #[cfg(feature = "dim3")]
         let mb_contact_index = Tensor::vector_uninit(backend, contacts_capacity, storage).unwrap();
         let contacts_indirect =
             Tensor::scalar_uninit(backend, BufferUsages::STORAGE | BufferUsages::INDIRECT).unwrap();
@@ -758,7 +740,6 @@ impl RbdState {
 
         let contacts_capacity_cpu = contacts_capacity;
         let collision_pairs_capacity_cpu = pairs_capacity;
-        #[allow(unused_mut)] // Only mutated with the dim3 (multibody) feature.
         let mut bi = BatchIndices {
             num_batches,
             colliders_batch_capacity: num_colliders_per_batch as u32,
@@ -770,7 +751,6 @@ impl RbdState {
             solver_color_buckets_stride: color_buckets_stride,
             ..Default::default()
         };
-        #[cfg(feature = "dim3")]
         multibodies.fill_batch_indices(&mut bi);
         let batch_indices = Tensor::scalar(
             backend,
@@ -792,12 +772,10 @@ impl RbdState {
             .unwrap(),
             sim_params_cpu: sim_params,
             vels: Tensor::vector(backend, &all_vels, storage | BufferUsages::COPY_DST).unwrap(),
-            #[cfg(feature = "dim3")]
             reset_templates_bodies: None,
             solver_vels: Tensor::vector(backend, &all_vels, storage).unwrap(),
             solver_vels_inc: Tensor::vector(backend, &all_vels, storage).unwrap(),
             joints,
-            #[cfg(feature = "dim3")]
             multibodies,
             gravity: RbdState::gravity_tensor(backend, [0.0, -9.81, 0.0]),
             body_group,
@@ -844,14 +822,12 @@ impl RbdState {
             collision_pairs_len_cpu: 0,
             graph_generation: 0,
             compute_graph: Default::default(),
-            #[cfg(feature = "dim3")]
             mb_cons_demand_cpu: 0,
             batch_indices,
             contacts,
             contacts_indirect,
             contact_plan,
             pfm_sort,
-            #[cfg(feature = "dim3")]
             mb_contact_index,
             mb_sweep_indirect,
             pfm_pairs,

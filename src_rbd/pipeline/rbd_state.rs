@@ -2,13 +2,11 @@
 //! run statistics and capacity/resize policies.
 use crate::broad_phase::{LbvhState, PfmSortState};
 use crate::dynamics::GpuImpulseJointSet;
-#[cfg(feature = "dim3")]
 use crate::dynamics::GpuMultibodySet;
 use crate::math::Pose;
 use crate::queries::{GpuColliderMaterial, GpuIndexedContact};
 use crate::shaders::PaddedVector;
 use crate::shaders::broad_phase::{CollisionPair, ContactPlan, NarrowPhasePfmPair};
-#[cfg(feature = "dim3")]
 use crate::shaders::dynamics::MbContactIndexEntry;
 use crate::shaders::dynamics::{
     LocalMassProperties as GpuLocalMassProperties, RbdSimParams, TwoBodyConstraint,
@@ -144,7 +142,6 @@ pub struct RbdState {
     pub(super) vels: Tensor<GpuVelocity>,
     /// GPU-resident rigid-body reset templates, published by
     /// `publish_reset_templates` and consumed by `reset_envs_from_templates`.
-    #[cfg(feature = "dim3")]
     pub(super) reset_templates_bodies: Option<ResetTemplatesBodies>,
     pub(super) solver_vels: Tensor<GpuVelocity>,
     pub(super) solver_vels_inc: Tensor<GpuVelocity>,
@@ -199,7 +196,6 @@ pub struct RbdState {
     pub compute_graph: ComputeGraphCache<RbdGraphKey>,
     /// CPU mirror of the multibody contact-constraint slot demand, refreshed
     /// by the same (asynchronous) readback as `collision_pairs_len_cpu`.
-    #[cfg(feature = "dim3")]
     pub(super) mb_cons_demand_cpu: u32,
     /// Single uniform aggregating every per-batch capacity and packed-buffer
     /// section offset consumed by the compute kernels (multibody and RBD
@@ -222,7 +218,6 @@ pub struct RbdState {
     /// Contact→multibody index: per-(multibody, batch) segments of contact
     /// slots (one entry per contact touching a multibody link), rebuilt each
     /// step. Sized like `contacts` (each contact owns at most one entry).
-    #[cfg(feature = "dim3")]
     pub(super) mb_contact_index: Tensor<MbContactIndexEntry>,
     /// Workgroup grid for the per-multibody contact-constraint dispatches:
     /// `[multibodies_batch_capacity, num_batches, 1]`.
@@ -253,7 +248,6 @@ pub struct RbdState {
     pub(super) uncolored_staging: Tensor<u32>,
     pub(super) lbvh: LbvhState,
     pub(super) joints: GpuImpulseJointSet,
-    #[cfg(feature = "dim3")]
     pub(super) multibodies: GpuMultibodySet,
     /// The one gravity uniform every rigid-body and multibody kernel reads.
     pub(super) gravity: Tensor<glamx::Vec4>,
@@ -293,7 +287,6 @@ impl RbdState {
     /// happens that any kernel reads via its `batch_ids` uniform.
     pub(super) fn rebuild_batch_indices(&mut self, backend: &GpuBackend) {
         self.graph_generation += 1;
-        #[allow(unused_mut)] // Only mutated with the dim3 (multibody) feature.
         let mut bi = BatchIndices {
             num_batches: self.num_batches,
             colliders_batch_capacity: self.num_colliders_per_batch,
@@ -305,7 +298,6 @@ impl RbdState {
             solver_color_buckets_stride: self.max_colors + 3,
             ..Default::default()
         };
-        #[cfg(feature = "dim3")]
         self.multibodies.fill_batch_indices(&mut bi);
         backend
             .write_buffer(self.batch_indices.buffer_mut(), 0, &[bi])
@@ -475,7 +467,6 @@ impl RbdState {
 
     /// Mutable access to the multibody set, useful for runtime mutations like
     /// per-step motor changes.
-    #[cfg(feature = "dim3")]
     pub fn multibodies_mut(&mut self) -> &mut crate::dynamics::GpuMultibodySet {
         &mut self.multibodies
     }
@@ -484,33 +475,28 @@ impl RbdState {
     /// costs one normal + `DIM - 1` friction slots). Refreshed by the same
     /// asynchronous readback as [`Self::collision_pairs_len`], so it lags a
     /// frame or two behind the GPU.
-    #[cfg(feature = "dim3")]
     pub fn mb_contact_constraints_len(&self) -> u32 {
         self.mb_cons_demand_cpu
     }
 
     /// Current capacity (in slots) of the flat multibody contact-constraint
     /// buffer (see [`RbdCapacities::mb_contact_constraints_capacity`]).
-    #[cfg(feature = "dim3")]
     pub fn mb_contact_constraints_capacity(&self) -> u32 {
         self.multibodies.contact_constraints_capacity()
     }
 
     /// Immutable access to the multibody set (e.g. to read back `dof_state`).
-    #[cfg(feature = "dim3")]
     pub fn multibodies(&self) -> &crate::dynamics::GpuMultibodySet {
         &self.multibodies
     }
 
     /// Enables or disables the implicit treatment of multibody coriolis forces.
-    #[cfg(feature = "dim3")]
     pub fn set_implicit_coriolis(&mut self, backend: &GpuBackend, enabled: bool) {
         self.multibodies.set_implicit_coriolis(enabled);
         self.rebuild_batch_indices(backend);
     }
 
     /// Sets the per-DoF dry joint friction (N·m).
-    #[cfg(feature = "dim3")]
     pub fn set_dof_frictionloss(&mut self, backend: &GpuBackend, values: &[f32]) {
         self.multibodies.set_dof_frictionloss(backend, values);
         self.rebuild_batch_indices(backend);
@@ -660,7 +646,6 @@ pub(super) fn world_mprops_from_local(
 
 /// GPU-resident rigid-body reset templates (see
 /// [`RbdState::publish_reset_templates`]).
-#[cfg(feature = "dim3")]
 pub(super) struct ResetTemplatesBodies {
     poses: Tensor<Pose>,
     vels: Tensor<GpuVelocity>,
@@ -671,7 +656,6 @@ pub(super) struct ResetTemplatesBodies {
 /// CPU snapshot of one (single-batch) physics template: body poses, velocities
 /// and the multibody joint-space state, read off the GPU once so per-env resets
 /// need no readback. See [`RbdState::snapshot`].
-#[cfg(feature = "dim3")]
 #[derive(Clone)]
 pub struct RbdSnapshot {
     body_poses: Vec<Pose>,
@@ -679,7 +663,6 @@ pub struct RbdSnapshot {
     mb: crate::dynamics::GpuMultibodySnapshot,
 }
 
-#[cfg(feature = "dim3")]
 impl RbdSnapshot {
     /// Debug/test accessor: body `body_id`'s snapshotted (dense per-env) pose.
     pub fn debug_body_pose(&self, body_id: usize) -> Pose {
@@ -702,7 +685,6 @@ impl RbdSnapshot {
     }
 }
 
-#[cfg(feature = "dim3")]
 impl RbdState {
     /// Reads this (template) physics state off the GPU into a CPU snapshot.
     /// Call it once per template at setup and pass the result to
@@ -865,7 +847,13 @@ impl RbdState {
             .collect();
         let offs: Vec<Vec4> = offsets
             .iter()
-            .map(|o| Vec4::new(o.x, o.y, o.z, 0.0))
+            .map(|o| {
+                #[cfg(feature = "dim3")]
+                let z = o.z;
+                #[cfg(feature = "dim2")]
+                let z = 0.0;
+                Vec4::new(o.x, o.y, z, 0.0)
+            })
             .collect();
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
         let t_meta = Tensor::vector(backend, &meta, storage).unwrap();
@@ -950,13 +938,10 @@ pub struct RbdGraphKey {
     /// Whether there are no impulse joints.
     pub joints_empty: bool,
     /// Capacity of the multibody contact-constraint slabs.
-    #[cfg(feature = "dim3")]
     pub mb_contact_constraints_capacity: u32,
     /// Whether there are no multibodies.
-    #[cfg(feature = "dim3")]
     pub multibodies_empty: bool,
     /// Number of graph colors of the multibody impulse joints.
-    #[cfg(feature = "dim3")]
     pub mb_imp_joint_num_colors: u32,
     /// Whether the fused colored-sweep kernels are used.
     pub fused_color_sweeps: bool,
@@ -984,11 +969,8 @@ impl RbdState {
             // NOTE: not `mb_cons_demand_cpu`: it is a readback mirror that
             // changes as the scene evolves; the resize it may trigger bumps
             // `graph_generation`, which is what the graph depends on.
-            #[cfg(feature = "dim3")]
             mb_contact_constraints_capacity: self.mb_contact_constraints_capacity(),
-            #[cfg(feature = "dim3")]
             multibodies_empty: self.multibodies.is_empty(),
-            #[cfg(feature = "dim3")]
             mb_imp_joint_num_colors: self.multibodies.mb_imp_joint_num_colors(),
             fused_color_sweeps: crate::pipeline::RbdPipeline::fused_color_sweeps(self),
         }

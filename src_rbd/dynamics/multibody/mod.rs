@@ -4,9 +4,7 @@
 //! batches into flat GPU tensors. `GpuMultibodySolver::step` advances them one step,
 //! dispatched one workgroup per multibody.
 //!
-//! Contacts and user-defined joint constraints are intentionally not handled.
-
-#![cfg(feature = "dim3")]
+//! Supports native 2D and 3D articulation dynamics, contacts, and external joints.
 
 mod env_reset;
 mod loop_closing_joints;

@@ -2,7 +2,6 @@
 
 use crate::broad_phase::{LbvhState, PfmSortState};
 use crate::dynamics::GpuImpulseJointSet;
-#[cfg(feature = "dim3")]
 use crate::dynamics::GpuMultibodySet;
 use crate::math::{Pose, Vector};
 use crate::queries::GpuColliderMaterial;
@@ -17,7 +16,6 @@ use crate::utils::PrefixSumWorkspace;
 use std::ops::Range;
 
 use super::rbd_state::*;
-#[cfg(feature = "dim3")]
 use crate::rapier::dynamics::{MultibodyJointSet, RigidBodySet};
 use khal::BufferUsages;
 use khal::backend::{Backend, Encoder, GpuBackend, GpuBackendError, GpuReadback};
@@ -88,7 +86,6 @@ impl RbdState {
             .collect();
         let joints = GpuImpulseJointSet::from_rapier_filtered(backend, &joint_env_refs, &[], &[]);
 
-        #[cfg(feature = "dim3")]
         let mut multibodies = {
             let empty_mb = MultibodyJointSet::new();
             let empty_bodies = RigidBodySet::new();
@@ -141,15 +138,11 @@ impl RbdState {
         )
         .unwrap();
         // Readback: pair count, PFM count, uncolored count (+ the multibody
-        // contact-constraint demand on dim3).
-        #[cfg(feature = "dim3")]
+        // contact-constraint demand).
         let resize_readback = GpuReadback::new(backend, 4).unwrap();
-        #[cfg(not(feature = "dim3"))]
-        let resize_readback = GpuReadback::new(backend, 3).unwrap();
         let collision_pairs_indirect =
             Tensor::scalar_uninit(backend, BufferUsages::STORAGE | BufferUsages::INDIRECT).unwrap();
         let contacts = Tensor::vector_uninit(backend, contacts_capacity, storage).unwrap();
-        #[cfg(feature = "dim3")]
         let mb_contact_index = Tensor::vector_uninit(backend, contacts_capacity, storage).unwrap();
         let contacts_indirect =
             Tensor::scalar_uninit(backend, BufferUsages::STORAGE | BufferUsages::INDIRECT).unwrap();
@@ -212,7 +205,6 @@ impl RbdState {
 
         let contacts_capacity_cpu = contacts_capacity;
         let collision_pairs_capacity_cpu = pairs_capacity;
-        #[allow(unused_mut)] // Only mutated with the dim3 (multibody) feature.
         let mut bi = BatchIndices {
             num_batches,
             colliders_batch_capacity: num_colliders_per_batch,
@@ -225,7 +217,6 @@ impl RbdState {
             solver_color_buckets_stride: color_buckets_stride,
             ..Default::default()
         };
-        #[cfg(feature = "dim3")]
         multibodies.fill_batch_indices(&mut bi);
         let batch_indices = Tensor::scalar(
             backend,
@@ -247,12 +238,10 @@ impl RbdState {
             .unwrap(),
             sim_params_cpu: base_sim_params,
             vels: Tensor::vector(backend, &all_vels, rw).unwrap(),
-            #[cfg(feature = "dim3")]
             reset_templates_bodies: None,
             solver_vels: Tensor::vector(backend, &all_vels, storage).unwrap(),
             solver_vels_inc: Tensor::vector(backend, &all_vels, storage).unwrap(),
             joints,
-            #[cfg(feature = "dim3")]
             multibodies,
             gravity: Self::gravity_tensor(backend, [0.0, -9.81, 0.0]),
             body_group,
@@ -278,14 +267,12 @@ impl RbdState {
             collision_pairs_len_cpu: 0,
             graph_generation: 0,
             compute_graph: Default::default(),
-            #[cfg(feature = "dim3")]
             mb_cons_demand_cpu: 0,
             batch_indices,
             contacts,
             contacts_indirect,
             contact_plan,
             pfm_sort,
-            #[cfg(feature = "dim3")]
             mb_contact_index,
             mb_sweep_indirect,
             pfm_pairs,

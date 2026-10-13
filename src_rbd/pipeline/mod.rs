@@ -14,10 +14,9 @@ mod rbd_step;
 #[cfg(all(test, feature = "dim3"))]
 mod test_batched_stacks;
 
-#[cfg(feature = "dim3")]
 pub use rbd_state::RbdSnapshot;
 pub use rbd_state::{RbdCapacities, RbdGraphKey, RbdResizePolicy, RbdState, RunStats};
 pub use rbd_step::RbdPipeline;
 
-#[cfg(all(test, feature = "dim3", feature = "cpu", feature = "webgpu"))]
+#[cfg(all(test, feature = "cpu", feature = "webgpu"))]
 mod test_articulation;
