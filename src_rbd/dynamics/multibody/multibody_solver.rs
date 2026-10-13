@@ -6,8 +6,8 @@ use crate::queries::GpuIndexedContact;
 use crate::shaders::broad_phase::ContactPlan;
 use crate::shaders::dynamics::{
     GpuMbApplyArticulatedBodyForces, GpuMbApplyContactRestitution, GpuMbBuildContactDelassus,
-    GpuMbComputeKinematics, GpuMbComputeSolveBounds, GpuMbConsOffsetsScan,
-    GpuMbCountContactConstraints, GpuMbDelayTick, GpuMbFactorArticulatedBody,
+    GpuMbBuildJointResponseColumns, GpuMbComputeKinematics, GpuMbComputeSolveBounds,
+    GpuMbConsOffsetsScan, GpuMbCountContactConstraints, GpuMbDelayTick, GpuMbFactorArticulatedBody,
     GpuMbFinalizeContactConstraints, GpuMbFinalizeImpulseJointConstraints,
     GpuMbFinalizeJointConstraints, GpuMbInitContactConstraints, GpuMbInitJointConstraints,
     GpuMbIntegrate, GpuMbIntegrateVelocities, GpuMbPublishState, GpuMbRefreshJointConstraints,
@@ -28,6 +28,7 @@ use vortx::tensor::Tensor;
 pub struct GpuMultibodySolver {
     compute_kinematics: GpuMbComputeKinematics,
     factor_tree: GpuMbFactorArticulatedBody,
+    build_joint_response_columns: GpuMbBuildJointResponseColumns,
     apply_forces: GpuMbApplyArticulatedBodyForces,
     init_joint_with_bias: GpuMbInitJointConstraints,
     /// M⁻¹-column back-solve for the joint constraints, split from the build
@@ -416,7 +417,7 @@ impl GpuMultibodySolver {
             // the 8-storage-buffer budget.
             let mut pass =
                 encoder.begin_pass("[RBD] mbb/finalize-joint", timestamps.as_deref_mut());
-            self.finalize_joint_constraints.call(
+            self.build_joint_response_columns.call(
                 &mut pass,
                 [
                     mb.num_batches,
@@ -428,6 +429,18 @@ impl GpuMultibodySolver {
                 &mut mb.joint_constraint_columns,
                 &mb.tree_factors,
                 &mut mb.tree_scratch,
+                args.batch_indices,
+            )?;
+            self.finalize_joint_constraints.call(
+                &mut pass,
+                [
+                    mb.num_batches,
+                    mb.max_joint_constraints,
+                    mb.multibodies_per_batch,
+                ],
+                &mb.multibody_info,
+                &mut mb.joint_constraints,
+                &mb.joint_constraint_columns,
                 args.batch_indices,
             )?;
         }

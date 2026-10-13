@@ -280,6 +280,20 @@ fn emit_joint_constraints(
             slot += 1;
         }
     }
+    for s in 0..slot {
+        let mut cons = joint_constraints.read(cons_base + s as usize);
+        cons.response_slot = s;
+        if s > 0 {
+            let previous = joint_constraints.read(cons_base + s as usize - 1);
+            if cons.dof_id == previous.dof_id
+                && cons.dof2_id == previous.dof2_id
+                && cons.coupling_coeff == previous.coupling_coeff
+            {
+                cons.response_slot = previous.response_slot;
+            }
+        }
+        joint_constraints.write(cons_base + s as usize, cons);
+    }
 }
 
 /// `1 / x`, or 0 when `x == 0` — matches rapier's `crate::utils::inv`.
@@ -339,7 +353,7 @@ fn build_limit_constraint(
         coupling_coeff: 0.0,
         coupling_offset: 0.0,
         _kind_extra2: 0,
-        _pad1: 0,
+        response_slot: 0,
     }
 }
 
@@ -372,7 +386,7 @@ fn build_coupling_constraint(
         coupling_coeff: coupling.coeff,
         coupling_offset: coupling.offset,
         _kind_extra2: coupling.link_axis1,
-        _pad1: 0,
+        response_slot: 0,
     }
 }
 
@@ -409,7 +423,7 @@ fn build_friction_constraint(
         coupling_coeff: 0.0,
         coupling_offset: 0.0,
         _kind_extra2: 0,
-        _pad1: 0,
+        response_slot: 0,
     }
 }
 
@@ -467,7 +481,7 @@ fn build_motor_constraint(
         coupling_coeff: 0.0,
         coupling_offset: 0.0,
         _kind_extra2: 0,
-        _pad1: 0,
+        response_slot: 0,
     }
 }
 
@@ -575,11 +589,11 @@ pub fn gpu_mb_init_joint_constraints(
 /// constraint slots in different batches.
 #[spirv_bindgen]
 #[spirv(compute(threads(64)))]
-pub fn gpu_mb_finalize_joint_constraints(
+pub fn gpu_mb_build_joint_response_columns(
     #[spirv(global_invocation_id)] invocation_id: UVec3,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] multibody_info: &[MultibodyInfo],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)]
-    joint_constraints: &mut [MultibodyJointConstraint],
+    joint_constraints: &[MultibodyJointConstraint],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)]
     joint_constraint_columns: &mut [f32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] tree_factors: &[u32],
@@ -604,8 +618,8 @@ pub fn gpu_mb_finalize_joint_constraints(
         .ib(batch_id, tree_factors)
         .offset(mb.first_link as usize * ARTICULATED_FACTOR_WORDS);
 
-    let mut cons = joint_constraints.read(cons_base + s as usize);
-    if cons.kind == 0 {
+    let cons = joint_constraints.read(cons_base + s as usize);
+    if cons.kind == 0 || cons.response_slot != s {
         return;
     }
     let local_slot = mb.first_constraint as usize + s as usize;
@@ -633,12 +647,37 @@ pub fn gpu_mb_finalize_joint_constraints(
             + batch_id as usize,
         batch_ids.num_batches as usize,
     );
-    let lhs = joint_constraint_columns.read(column.at(cons.dof_id))
-        - cons.coupling_coeff * joint_constraint_columns.read(column.at(cons.dof2_id));
+}
+
+#[spirv_bindgen]
+#[spirv(compute(threads(64)))]
+pub fn gpu_mb_finalize_joint_constraints(
+    #[spirv(global_invocation_id)] id: UVec3,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] infos: &[MultibodyInfo],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)]
+    constraints: &mut [MultibodyJointConstraint],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] columns: &[f32],
+    #[spirv(uniform, descriptor_set = 0, binding = 3)] batches: &BatchIndices,
+) {
+    if id.x >= batches.num_batches || id.z >= batches.multibodies_len {
+        return;
+    }
+    let mb = batches.ib(id.x, infos).read(id.z as usize);
+    if id.y >= mb.max_constraints {
+        return;
+    }
+    let index = batches.mb_joint_constraints_start(id.x) + (mb.first_constraint + id.y) as usize;
+    let mut cons = constraints.read(index);
+    if cons.kind == 0 {
+        return;
+    }
+    let column = batches.mb_joint_constraint_column(id.x, mb.first_constraint + cons.response_slot);
+    let lhs = columns.read(column.at(cons.dof_id))
+        - cons.coupling_coeff * columns.read(column.at(cons.dof2_id));
     let cfm_gain = lhs * cons.cfm_coeff + cons.cfm_gain;
     cons.cfm_gain = cfm_gain;
     cons.inv_lhs = inv(lhs + cfm_gain);
-    joint_constraints.write(cons_base + s as usize, cons);
+    constraints.write(index, cons);
 }
 
 /// Per-substep refresh of the joint limit / motor slots, the cheap alternative
@@ -745,6 +784,7 @@ pub fn gpu_mb_refresh_joint_constraints(
         };
         fresh.inv_lhs = old.inv_lhs;
         fresh.cfm_gain = old.cfm_gain;
+        fresh.response_slot = old.response_slot;
         joint_constraints.write(cons_base + s as usize, fresh);
     }
 }

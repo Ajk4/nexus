@@ -247,7 +247,8 @@ pub struct MultibodyJointConstraint {
     /// Packed `(link_id | axis << 16)` of the coupling's first joint
     /// coordinate (`q1`), for the per-substep drift refresh.
     pub _kind_extra2: u32,
-    pub _pad1: u32,
+    /// Local constraint slot owning the shared inverse-mass response.
+    pub response_slot: u32,
 }
 
 /// One normal-direction contact constraint between a free rigid body and a

@@ -213,7 +213,7 @@ pub fn gpu_mb_solve_constraints(
         if solve && lane < ndofs {
             let col = joint_constraint_columns.read(
                 batch_ids
-                    .mb_joint_constraint_column(batch_id, mb.first_constraint + s)
+                    .mb_joint_constraint_column(batch_id, mb.first_constraint + cons.response_slot)
                     .at(lane),
             );
             dof_v._store(lane as usize, dof_v._load(lane as usize) - delta * col);
@@ -512,7 +512,7 @@ pub fn gpu_mb_solve_joints(
         if solve && lane < ndofs {
             let col = joint_constraint_columns.read(
                 batch_ids
-                    .mb_joint_constraint_column(batch_id, mb.first_constraint + s)
+                    .mb_joint_constraint_column(batch_id, mb.first_constraint + cons.response_slot)
                     .at(lane),
             );
             dof_v._store(lane as usize, dof_v._load(lane as usize) - delta * col);
