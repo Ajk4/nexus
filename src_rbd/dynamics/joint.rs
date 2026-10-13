@@ -86,6 +86,7 @@ pub struct GpuImpulseJointSet {
     /// Identical across batches by the equal-topology invariant.
     num_active_joints: u32,
     num_colors: u32,
+    num_pgs_iterations: u32,
     /// Host copy of the per-color prefix sums in `color_groups` (identical
     /// across batches), used to size each per-color solve dispatch exactly.
     color_groups_cpu: Vec<u32>,
@@ -330,6 +331,7 @@ impl GpuImpulseJointSet {
             // invariant, so the per-batch active count is any env's count.
             num_active_joints: filtered_lens.first().copied().unwrap_or(0),
             num_colors: global_num_colors,
+            num_pgs_iterations: 1,
             color_groups_cpu: all_color_groups.clone(),
             color_groups: Tensor::vector(backend, &all_color_groups, usage).unwrap(),
             joints: Tensor::vector(backend, &all_joints, usage).unwrap(),
@@ -347,6 +349,12 @@ impl GpuImpulseJointSet {
     /// indices and locked axes: changing topology requires rebuilding the set.
     pub fn data_mut(&mut self) -> &mut Tensor<ImpulseJoint> {
         &mut self.joints
+    }
+
+    /// Number of joint PGS sweeps per solve phase, without adding simulation substeps.
+    pub fn set_num_pgs_iterations(&mut self, iterations: u32) {
+        assert!(iterations > 0);
+        self.num_pgs_iterations = iterations;
     }
 
     /// Is this set empty?
@@ -472,28 +480,29 @@ impl GpuJointSolver {
         // One dispatch per color, sized exactly to that color's group (the
         // prefix sums are known on the host). The color index is bound as a
         // tiny pre-built uniform instead of a GPU-incremented cursor.
-        for c in 0..args.joints.num_colors as usize {
-            let start = if c > 0 {
-                args.joints.color_groups_cpu[c - 1]
-            } else {
-                0
-            };
-            let group_len = args.joints.color_groups_cpu[c] - start;
-            if group_len == 0 {
-                continue;
+        for _ in 0..args.joints.num_pgs_iterations {
+            for c in 0..args.joints.num_colors as usize {
+                let start = if c > 0 {
+                    args.joints.color_groups_cpu[c - 1]
+                } else {
+                    0
+                };
+                let group_len = args.joints.color_groups_cpu[c] - start;
+                if group_len == 0 {
+                    continue;
+                }
+                self.solve_joint_constraints.call(
+                    pass,
+                    group_len * args.num_batches,
+                    &mut args.joints.constraints,
+                    solver_vels,
+                    &args.joints.color_groups,
+                    &args.color_uniforms[c],
+                    args.batch_indices,
+                    use_bias_uniform,
+                )?;
             }
-            self.solve_joint_constraints.call(
-                pass,
-                group_len * args.num_batches,
-                &mut args.joints.constraints,
-                solver_vels,
-                &args.joints.color_groups,
-                &args.color_uniforms[c],
-                args.batch_indices,
-                use_bias_uniform,
-            )?;
         }
-
         Ok(())
     }
 }
