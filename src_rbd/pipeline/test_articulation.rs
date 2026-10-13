@@ -451,74 +451,173 @@ async fn articulation_benchmark() {
         (24, 4096),
         (48, 1024),
     ] {
-        let scenes: Vec<_> = (0..batches).map(|_| _benchmark_chain(links)).collect();
-        // Contact-free benchmark: keep the unused contact banks minimal.
-        let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 1);
-        for _ in 0..10 {
+        _measure_articulation(&backend, links, batches).await;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BenchmarkSample {
+    envs: usize,
+    wall_ms: f64,
+    gpu_ms: f64,
+    articulation_ms: f64,
+}
+
+#[futures_test::test]
+#[ignore = "bounded environment-count scaling probe"]
+async fn articulation_env_scaling() {
+    let backend = _backend().await;
+    if let GpuBackend::WebGpu(webgpu) = &backend {
+        eprintln!("adapter={:?}", webgpu.device().adapter_info());
+    }
+    for links in [3, 24] {
+        let mut samples = Vec::new();
+        // The 24-collider brute-force dispatch uses nine workgroups per env;
+        // 8192 envs exceed WebGPU's 65535 workgroup limit on its X dimension.
+        let largest = if links == 3 { 8192 } else { 6144 };
+        for envs in [1, 64, 256, 512, 1024, 2048, 4096, largest] {
+            samples.push(_measure_articulation(&backend, links, envs).await);
+        }
+        for (range, min_envs) in [("all", 1), ("large", 1024)] {
+            let selected: Vec<_> = samples.iter().filter(|s| s.envs >= min_envs).collect();
+            _report_linear_fit(links, range, "wall", &selected, |s| s.wall_ms);
+            _report_linear_fit(links, range, "all_gpu", &selected, |s| s.gpu_ms);
+            _report_linear_fit(links, range, "articulation_gpu", &selected, |s| {
+                s.articulation_ms
+            });
+        }
+        // Repeat the GPU-bound range in reverse order to check clock/order effects.
+        let mut reverse = Vec::new();
+        for envs in [largest, 4096, 2048, 1024] {
+            reverse.push(_measure_articulation(&backend, links, envs).await);
+        }
+        let selected: Vec<_> = reverse.iter().collect();
+        _report_linear_fit(links, "reverse_large", "wall", &selected, |s| s.wall_ms);
+        _report_linear_fit(links, "reverse_large", "all_gpu", &selected, |s| s.gpu_ms);
+        _report_linear_fit(links, "reverse_large", "articulation_gpu", &selected, |s| {
+            s.articulation_ms
+        });
+    }
+}
+
+fn _report_linear_fit(
+    links: usize,
+    range: &str,
+    metric: &str,
+    samples: &[&BenchmarkSample],
+    value: impl Fn(&BenchmarkSample) -> f64,
+) {
+    let n = samples.len() as f64;
+    let mean_x = samples.iter().map(|s| s.envs as f64).sum::<f64>() / n;
+    let mean_y = samples.iter().map(|s| value(s)).sum::<f64>() / n;
+    let xx = samples
+        .iter()
+        .map(|s| (s.envs as f64 - mean_x).powi(2))
+        .sum::<f64>();
+    let xy = samples
+        .iter()
+        .map(|s| (s.envs as f64 - mean_x) * (value(s) - mean_y))
+        .sum::<f64>();
+    let slope = xy / xx;
+    let intercept = mean_y - slope * mean_x;
+    let residual = samples
+        .iter()
+        .map(|s| (value(s) - intercept - slope * s.envs as f64).powi(2))
+        .sum::<f64>();
+    let total = samples
+        .iter()
+        .map(|s| (value(s) - mean_y).powi(2))
+        .sum::<f64>();
+    let max_relative = samples
+        .iter()
+        .map(|s| (value(s) - intercept - slope * s.envs as f64).abs() / value(s))
+        .fold(0.0, f64::max);
+    eprintln!(
+        "fit links={links} range={range} metric={metric} intercept_ms={intercept:.6} slope_us_per_env={:.6} r_squared={:.6} max_residual_percent={:.2}",
+        slope * 1000.0,
+        1.0 - residual / total,
+        max_relative * 100.0
+    );
+}
+
+async fn _measure_articulation(
+    backend: &GpuBackend,
+    links: usize,
+    batches: usize,
+) -> BenchmarkSample {
+    let scenes: Vec<_> = (0..batches).map(|_| _benchmark_chain(links)).collect();
+    // Contact-free benchmark: keep the unused contact banks minimal.
+    let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 1);
+    for _ in 0..10 {
+        pipeline.step(&backend, &mut state, None).unwrap();
+    }
+    backend.synchronize().unwrap();
+    let mut elapsed = Vec::new();
+    let mut host = Vec::new();
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        let mut host_seconds = 0.0;
+        for _ in 0..20 {
+            let host_start = std::time::Instant::now();
             pipeline.step(&backend, &mut state, None).unwrap();
+            host_seconds += host_start.elapsed().as_secs_f64();
         }
         backend.synchronize().unwrap();
-        let mut elapsed = Vec::new();
-        let mut host = Vec::new();
-        for _ in 0..3 {
-            let start = std::time::Instant::now();
-            let mut host_seconds = 0.0;
-            for _ in 0..20 {
-                let host_start = std::time::Instant::now();
-                pipeline.step(&backend, &mut state, None).unwrap();
-                host_seconds += host_start.elapsed().as_secs_f64();
-            }
-            backend.synchronize().unwrap();
-            elapsed.push(start.elapsed().as_secs_f64() / 20.0);
-            host.push(host_seconds / 20.0);
-        }
-        elapsed.sort_by(f64::total_cmp);
-        host.sort_by(f64::total_cmp);
-        let seconds = elapsed[1];
-        let mut timestamps = khal::backend::GpuTimestamps::new(&backend, 256);
-        assert!(
-            timestamps.is_enabled(),
-            "benchmark requires pass timestamps"
-        );
-        let mut gpu_ms = Vec::new();
-        let mut articulation_ms = Vec::new();
-        for _ in 0..5 {
-            timestamps.reset();
-            pipeline
-                .step(&backend, &mut state, Some(&mut timestamps))
-                .unwrap();
-            backend.synchronize().unwrap();
-            let passes = timestamps.read(&backend).await.unwrap();
-            gpu_ms.push(passes.iter().map(|p| p.duration_ms).sum::<f64>());
-            articulation_ms.push(
-                passes
-                    .iter()
-                    .filter(|p| p.label.contains("mb"))
-                    .map(|p| p.duration_ms)
-                    .sum::<f64>(),
-            );
-        }
-        gpu_ms.sort_by(f64::total_cmp);
-        articulation_ms.sort_by(f64::total_cmp);
-        let allocations = state.multibodies()._core_allocation_sizes();
-        let bytes: usize = allocations.iter().map(|(_, bytes)| bytes).sum();
-        let infos: Vec<crate::shaders::dynamics::MultibodyInfo> = backend
-            .slow_read_vec(state.multibodies().multibody_info().buffer())
-            .await
+        elapsed.push(start.elapsed().as_secs_f64() / 20.0);
+        host.push(host_seconds / 20.0);
+    }
+    elapsed.sort_by(f64::total_cmp);
+    host.sort_by(f64::total_cmp);
+    let seconds = elapsed[1];
+    let mut timestamps = khal::backend::GpuTimestamps::new(&backend, 256);
+    assert!(
+        timestamps.is_enabled(),
+        "benchmark requires pass timestamps"
+    );
+    let mut gpu_ms = Vec::new();
+    let mut articulation_ms = Vec::new();
+    for _ in 0..5 {
+        timestamps.reset();
+        pipeline
+            .step(&backend, &mut state, Some(&mut timestamps))
             .unwrap();
-        let ndofs = infos[0].ndofs;
-        let poses = _poses(&backend, &state).await;
-        assert!(poses.iter().all(|p| p.translation.is_finite()));
-        eprintln!(
-            "dim={} links={links} batches={batches} dofs={ndofs} core_bytes_per_env={} wall_ms={:.3} host_call_ms={:.3} all_gpu_ms={:.3} articulation_gpu_ms={:.3} env_steps_per_second={:.0}",
-            crate::math::DIM,
-            bytes / batches,
-            seconds * 1000.0,
-            host[1] * 1000.0,
-            gpu_ms[2],
-            articulation_ms[2],
-            batches as f64 / seconds
+        backend.synchronize().unwrap();
+        let passes = timestamps.read(&backend).await.unwrap();
+        gpu_ms.push(passes.iter().map(|p| p.duration_ms).sum::<f64>());
+        articulation_ms.push(
+            passes
+                .iter()
+                .filter(|p| p.label.contains("mb"))
+                .map(|p| p.duration_ms)
+                .sum::<f64>(),
         );
+    }
+    gpu_ms.sort_by(f64::total_cmp);
+    articulation_ms.sort_by(f64::total_cmp);
+    let allocations = state.multibodies()._core_allocation_sizes();
+    let bytes: usize = allocations.iter().map(|(_, bytes)| bytes).sum();
+    let infos: Vec<crate::shaders::dynamics::MultibodyInfo> = backend
+        .slow_read_vec(state.multibodies().multibody_info().buffer())
+        .await
+        .unwrap();
+    let ndofs = infos[0].ndofs;
+    let poses = _poses(&backend, &state).await;
+    assert!(poses.iter().all(|p| p.translation.is_finite()));
+    eprintln!(
+        "dim={} links={links} batches={batches} dofs={ndofs} core_bytes_per_env={} wall_ms={:.3} host_call_ms={:.3} all_gpu_ms={:.3} articulation_gpu_ms={:.3} env_steps_per_second={:.0}",
+        crate::math::DIM,
+        bytes / batches,
+        seconds * 1000.0,
+        host[1] * 1000.0,
+        gpu_ms[2],
+        articulation_ms[2],
+        batches as f64 / seconds
+    );
+    BenchmarkSample {
+        envs: batches,
+        wall_ms: seconds * 1000.0,
+        gpu_ms: gpu_ms[2],
+        articulation_ms: articulation_ms[2],
     }
 }
 
