@@ -490,11 +490,7 @@ impl GpuSolver {
             /*
              * Integrate all positions once.
              */
-            mb_phase!(
-                "[RBD] slv/mb-integrate-pos",
-                substep_integrate_positions,
-                is_last_substep
-            );
+            mb_phase!("[RBD] slv/mb-integrate-pos", substep_integrate_positions);
             if !skip_rb {
                 let mut pass =
                     encoder.begin_pass("[RBD] slv/rb-integrate", timestamps.as_deref_mut());
@@ -511,7 +507,11 @@ impl GpuSolver {
             /*
              * Solve all joints + contacts without bias (stabilization).
              */
-            mb_phase!("[RBD] slv/mb-solve-nobias", substep_solve_no_bias);
+            mb_phase!(
+                "[RBD] slv/mb-solve-nobias",
+                substep_solve_no_bias,
+                is_last_substep
+            );
             if !skip_rb || !joints_empty {
                 let mut pass =
                     encoder.begin_pass("[RBD] slv/rb-solve-nobias", timestamps.as_deref_mut());
@@ -583,6 +583,16 @@ impl GpuSolver {
             )?;
         }
 
+        if let (Some(solver), Some(state)) = (mb_solver, mb_state.as_deref_mut()) {
+            let mut pass = encoder.begin_pass("[RBD] slv/mb-publish", None);
+            solver._publish_state(
+                &mut pass,
+                state,
+                args.body_poses,
+                args.vels,
+                args.batch_indices,
+            )?;
+        }
         Ok(())
     }
 }

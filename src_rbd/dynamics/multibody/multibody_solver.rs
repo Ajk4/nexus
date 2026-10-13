@@ -10,13 +10,13 @@ use crate::shaders::dynamics::{
     GpuMbFinalizeContactConstraints, GpuMbFinalizeImpulseJointConstraints,
     GpuMbFinalizeJointConstraints, GpuMbGravityAndLu, GpuMbGravityAndLuT1, GpuMbGravityAndLuT8,
     GpuMbGravityAndLuT16, GpuMbGravityAndLuT32, GpuMbInitContactConstraints,
-    GpuMbInitJointConstraints, GpuMbIntegrate, GpuMbIntegrateVelocities,
+    GpuMbInitJointConstraints, GpuMbIntegrate, GpuMbIntegrateVelocities, GpuMbPublishState,
     GpuMbRefreshJointConstraints, GpuMbRemoveImpulseJointConstraintBias, GpuMbSavePrevConsBounds,
     GpuMbScatterContactIndex, GpuMbSeedContactRestitution, GpuMbSenseContactImpulses,
     GpuMbSnapshotContactWarmstart, GpuMbSolveConstraints, GpuMbSolveContactsDelassus,
     GpuMbSolveImpulseJointConstraints, GpuMbSolveJoints, GpuMbTransferContactWarmstart,
-    GpuMbUpdateImpulseJointConstraints, GpuMbWarmstartContactConstraints, MbContactIndexEntry,
-    Velocity, WorldMassProperties,
+    GpuMbTransportVelocities, GpuMbUpdateImpulseJointConstraints, GpuMbWarmstartContactConstraints,
+    MbContactIndexEntry, Velocity, WorldMassProperties,
 };
 use crate::shaders::utils::BatchIndices;
 use khal::Shader;
@@ -96,6 +96,8 @@ pub struct GpuMultibodySolver {
     remove_impulse_joint_constraint_bias: GpuMbRemoveImpulseJointConstraintBias,
     integrate_velocities: GpuMbIntegrateVelocities,
     integrate: GpuMbIntegrate,
+    publish: GpuMbPublishState,
+    transport_velocities: GpuMbTransportVelocities,
 }
 
 /// Arguments for one multibody dispatch. The poses buffer is shared with the rest
@@ -263,8 +265,11 @@ impl GpuMultibodySolver {
             &mb.multibody_info,
             &mut mb.dof_state,
             &mb.gen_forces,
+            &mb.links_static,
+            &mut mb.links_workspace,
             &mb.dt,
             args.batch_indices,
+            args.gravity,
         )
     }
 
@@ -660,15 +665,13 @@ impl GpuMultibodySolver {
         Ok(())
     }
 
-    /// P4: integrate the multibody positions with the corrected `v`, then (if
-    /// not the last substep) recompute the dynamics (M, LU, `a`) for the next
-    /// substep's velocity update.
+    /// P4: integrate positions while retaining the constraint configuration
+    /// until the relaxation sweep has completed.
     pub fn substep_integrate_positions(
         &self,
         pass: &mut GpuPass,
         mb: &mut GpuMultibodySet,
         args: &mut MultibodySolverArgs<'_>,
-        is_last_substep: bool,
     ) -> Result<(), GpuBackendError> {
         if mb.is_empty() {
             return Ok(());
@@ -681,18 +684,11 @@ impl GpuMultibodySolver {
             &mb.multibody_info,
             &mb.links_static,
             &mut mb.links_workspace,
-            &mb.dof_state,
+            &mut mb.dof_state,
+            args.poses,
             &mb.dt,
             args.batch_indices,
         )?;
-
-        // Recompute the dynamics (FK, mass matrices, LU, accelerations) for
-        // the next substep. With implicit Coriolis off and the refresh cadence
-        // relaxed, the mass matrix is refreshed once per step instead, which is
-        // the main win of disabling implicit Coriolis in the first place.
-        if !is_last_substep && (mb.implicit_coriolis || mb.substep_refresh) {
-            self.compute_dynamics(pass, mb, args)?;
-        }
 
         Ok(())
     }
@@ -706,6 +702,7 @@ impl GpuMultibodySolver {
         pass: &mut GpuPass,
         mb: &mut GpuMultibodySet,
         args: &mut MultibodySolverArgs<'_>,
+        is_last_substep: bool,
     ) -> Result<(), GpuBackendError> {
         if mb.is_empty() {
             return Ok(());
@@ -750,6 +747,19 @@ impl GpuMultibodySolver {
             }
         }
 
+        self.transport_velocities.call(
+            pass,
+            mb.flat_mb_dispatch(),
+            &mb.multibody_info,
+            &mb.links_static,
+            &mut mb.links_workspace,
+            &mut mb.dof_state,
+            &mb.body_jacobians,
+            args.batch_indices,
+        )?;
+        if !is_last_substep && (mb.implicit_coriolis || mb.substep_refresh) {
+            self.compute_dynamics(pass, mb, args)?;
+        }
         Ok(())
     }
 
@@ -798,6 +808,30 @@ impl GpuMultibodySolver {
             &mb.max_contact_constraints,
             &mut mb.dof_state,
             args.solver_vels,
+        )
+    }
+
+    pub(crate) fn _publish_state(
+        &self,
+        pass: &mut GpuPass,
+        mb: &mut GpuMultibodySet,
+        poses: &mut Tensor<Pose>,
+        velocities: &mut Tensor<Velocity>,
+        indices: &Tensor<BatchIndices>,
+    ) -> Result<(), GpuBackendError> {
+        if mb.is_empty() {
+            return Ok(());
+        }
+        self.publish.call(
+            pass,
+            mb.flat_mb_dispatch(),
+            &mb.multibody_info,
+            &mb.links_static,
+            &mut mb.links_workspace,
+            &mb.dof_state,
+            poses,
+            velocities,
+            indices,
         )
     }
 
