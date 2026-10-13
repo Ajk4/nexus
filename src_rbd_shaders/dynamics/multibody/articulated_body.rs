@@ -321,13 +321,24 @@ pub(super) fn _solve_tree(
     }
     for reverse in 0..mb.num_links {
         let k = mb.num_links - 1 - reverse;
-        let node = _read_factor(factors, k as usize);
-        let factor = if implicit { node.implicit } else { node.plain };
+        let offset = k as usize * ARTICULATED_FACTOR_WORDS;
+        let dof = factors[offset + 1];
+        let ndofs = factors[offset + 2];
         let mut force = [0.; S];
+        let mut active = false;
         for i in 0..S {
             force[i] =
                 scratch.read(scratch_base + (k as usize * TREE_SCRATCH_WIDTH + i) * scratch_stride);
+            active |= force[i] != 0.;
         }
+        for i in 0..ndofs {
+            active |= rhs.read(row.at(dof + i)) != 0.;
+        }
+        if !active {
+            continue;
+        }
+        let node = _read_factor(factors, k as usize);
+        let factor = if implicit { node.implicit } else { node.plain };
         let projection = _apply(_transpose(node.motion), force);
         let mut u = [0.; S];
         for i in 0..node.ndofs as usize {
