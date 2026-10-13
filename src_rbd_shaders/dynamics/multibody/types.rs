@@ -435,9 +435,8 @@ pub struct MultibodyInfo {
     /// 0 if the root joint is fixed, 1 if it's a free joint.
     pub root_is_dynamic: u32,
     /// Offset (in f32 entries) into `coriolis_v` (`DIM × ndofs` per link) and
-    /// `coriolis_w` (`ANG_DIM × ndofs` per link, stride matches `coriolis_v`'s
-    /// `DIM × ndofs` slot allocation in the shared layout). Stacked
-    /// link-by-link in assembly order.
+    /// `coriolis_w` (`ANG_DIM × ndofs` per link, offset scaled by `ANG_DIM/DIM`).
+    /// Stacked link-by-link in assembly order.
     pub coriolis_offset: u32,
     /// Offset (in f32 entries) into `i_coriolis_dt`. One `SPATIAL_DIM × ndofs`
     /// scratch slot per multibody (transient — overwritten per link during

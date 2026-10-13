@@ -98,12 +98,14 @@ pub fn gpu_mb_compute_dynamics_pre(
     let cor_v0 = batch_ids.mb_region(batch_id, mb.coriolis_offset, cor_len);
     let cor_w0 = batch_ids.mb_region(
         batch_id,
-        batch_ids.coriolis_batch_capacity + mb.coriolis_offset,
-        cor_len,
+        batch_ids.coriolis_batch_capacity + mb.coriolis_offset / DIM * ANG_DIM,
+        num_links * ANG_DIM * ndofs,
     );
     let icdt0 = batch_ids.mb_region(
         batch_id,
-        2 * batch_ids.coriolis_batch_capacity + mb.i_coriolis_dt_offset,
+        batch_ids.coriolis_batch_capacity
+            + batch_ids.coriolis_batch_capacity / DIM * ANG_DIM
+            + mb.i_coriolis_dt_offset,
         SPATIAL_DIM as u32 * ndofs,
     );
     let vel_base = mb.first_dof as usize;
@@ -216,8 +218,8 @@ pub fn gpu_mb_compute_dynamics_pre(
                 fill_par(
                     coriolis_packed,
                     MatSlice::dense(
-                        cor_w0 + (k as usize) * (DIM as usize) * (ndofs as usize),
-                        DIM,
+                        cor_w0 + (k as usize) * (ANG_DIM as usize) * (ndofs as usize),
+                        ANG_DIM,
                         ndofs,
                     ),
                     0.0,
@@ -237,7 +239,7 @@ pub fn gpu_mb_compute_dynamics_pre(
             ndofs,
         );
         let coriolis_w_i = MatSlice::dense(
-            cor_w0 + (k as usize) * (DIM as usize) * (ndofs as usize),
+            cor_w0 + (k as usize) * (ANG_DIM as usize) * (ndofs as usize),
             ANG_DIM,
             ndofs,
         );
@@ -287,7 +289,7 @@ pub fn gpu_mb_compute_dynamics_pre(
                     ndofs,
                 );
                 let parent_coriolis_w = MatSlice::dense(
-                    cor_w0 + (parent_id as usize) * (DIM as usize) * (ndofs as usize),
+                    cor_w0 + (parent_id as usize) * (ANG_DIM as usize) * (ndofs as usize),
                     ANG_DIM,
                     ndofs,
                 );

@@ -392,7 +392,7 @@ impl GpuMultibodySet {
         let dofs_cap = global_max_dofs.max(1);
         let jac_cap = global_max_jac.max(1);
         let mm_cap = global_max_mm.max(1);
-        let cor_cap = global_max_cor.max(1);
+        let cor_cap = global_max_cor.max(crate::math::DIM as u32);
         let icdt_cap = global_max_icdt.max(1);
         let cons_cap = global_max_cons.max(1);
         let couplings_cap = global_max_couplings.max(1);
@@ -644,12 +644,11 @@ impl GpuMultibodySet {
             )
             .unwrap(),
             coriolis_packed: {
-                // Pack [coriolis_v (A), coriolis_w (A), i_coriolis_dt (B)]
-                // back-to-back where A = cor_cap * num_batches and B =
-                // icdt_cap * num_batches.
+                // Linear and angular blocks have DIM and ANG_DIM rows.
                 let a = (cor_cap * num_batches) as usize;
+                let w = a / crate::math::DIM * crate::shaders::ANG_DIM as usize;
                 let b = (icdt_cap * num_batches) as usize;
-                Tensor::vector(backend, vec![0.0f32; 2 * a + b], storage).unwrap()
+                Tensor::vector(backend, vec![0.0f32; a + w + b], storage).unwrap()
             },
             joint_constraints: Tensor::vector(
                 backend,
