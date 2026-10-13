@@ -962,9 +962,10 @@ async fn articulation_roots_kinematics_and_dynamics() {
 #[futures_test::test]
 async fn articulation_tree_inverse_matches_dense_operator() {
     use crate::shaders::dynamics::{
-        ARTICULATED_FACTOR_WORDS, GpuMbAssembleMassMatrix, GpuMbComputeDynamicsPre,
-        GpuMbFactorArticulatedBody, GpuMbInitializeArticulatedBody, GpuMbSolveArticulatedBody,
-        TREE_SCRATCH_WIDTH,
+        ARTICULATED_FACTOR_WORDS, GpuMbAssembleMassMatrix, GpuMbBuildJointResponseColumns,
+        GpuMbComputeDynamicsPre, GpuMbFactorArticulatedBody, GpuMbInitializeArticulatedBody,
+        GpuMbSolveArticulatedBody, MB_JOINT_KIND_COUPLING, MB_JOINT_KIND_MOTOR,
+        MultibodyJointConstraint, TREE_SCRATCH_WIDTH,
     };
     use khal::backend::Encoder;
     use khal::{BufferUsages, Shader};
@@ -1062,6 +1063,7 @@ async fn articulation_tree_inverse_matches_dense_operator() {
             assemble: GpuMbAssembleMassMatrix,
             initialize: GpuMbInitializeArticulatedBody,
             factor: GpuMbFactorArticulatedBody,
+            joint_responses: GpuMbBuildJointResponseColumns,
             solve: GpuMbSolveArticulatedBody,
         }
         let Kernels {
@@ -1069,6 +1071,7 @@ async fn articulation_tree_inverse_matches_dense_operator() {
             assemble,
             initialize,
             factor,
+            joint_responses,
             solve,
         } = Kernels::from_backend(&backend).unwrap();
         let mut encoder = backend.begin_encoding();
@@ -1129,6 +1132,92 @@ async fn articulation_tree_inverse_matches_dense_operator() {
         }
         backend.submit(encoder).unwrap();
         let matrix = backend.slow_read_vec(dense.buffer()).await.unwrap();
+        let mut links: Vec<crate::shaders::dynamics::MultibodyLinkStatic> =
+            vec![bytemuck::Zeroable::zeroed(); state.multibodies().links_per_batch() as usize];
+        backend
+            .slow_read_buffer(state.multibodies().links_static().buffer(), &mut links)
+            .await
+            .unwrap();
+        let source_link = |d: usize| {
+            links
+                .iter()
+                .position(|link| {
+                    d >= link.assembly_id as usize && d < (link.assembly_id + link.ndofs) as usize
+                })
+                .unwrap() as u32
+        };
+        let constraints: Vec<_> = (0..2 * n)
+            .map(|s| {
+                let d = s % n;
+                let paired = (d + n / 2) % n;
+                MultibodyJointConstraint {
+                    dof_id: d as u32,
+                    dof2_id: paired as u32,
+                    kind: if s < n {
+                        MB_JOINT_KIND_MOTOR
+                    } else {
+                        MB_JOINT_KIND_COUPLING
+                    },
+                    _kind_extra: source_link(d),
+                    _kind_extra2: source_link(paired),
+                    coupling_coeff: if s < n { 0. } else { 0.7 },
+                    response_slot: s as u32,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let constraints = Tensor::vector(&backend, constraints.clone(), storage).unwrap();
+        let mut joint_columns = Tensor::vector(&backend, vec![0.; 2 * n * n], storage).unwrap();
+        let mut joint_scratch = Tensor::vector(
+            &backend,
+            vec![f32::NAN; 2 * n * indices.mb_max_links as usize * TREE_SCRATCH_WIDTH],
+            storage,
+        )
+        .unwrap();
+        let joint_info = Tensor::vector(
+            &backend,
+            vec![crate::shaders::dynamics::MultibodyInfo {
+                first_constraint: 0,
+                max_constraints: (2 * n) as u32,
+                ..mb
+            }],
+            storage,
+        )
+        .unwrap();
+        let mut encoder = backend.begin_encoding();
+        {
+            let mut pass = encoder.begin_pass("sparse joint oracle", None);
+            joint_responses
+                .call(
+                    &mut pass,
+                    [1, (2 * n) as u32, 1],
+                    &joint_info,
+                    &constraints,
+                    &mut joint_columns,
+                    &factors,
+                    &mut joint_scratch,
+                    &state.batch_indices,
+                )
+                .unwrap();
+        }
+        backend.submit(encoder).unwrap();
+        let joint_columns = backend.slow_read_vec(joint_columns.buffer()).await.unwrap();
+        for s in 0..2 * n {
+            let d = s % n;
+            let paired = (d + n / 2) % n;
+            for row in 0..n {
+                let product: f32 = (0..n)
+                    .map(|k| matrix[k * n + row] * joint_columns[s * n + k])
+                    .sum();
+                let expected =
+                    if row == d { 1. } else { 0. } - if s >= n && row == paired { 0.7 } else { 0. };
+                assert!(
+                    (product - expected).abs() < 0.0003,
+                    "sparse n={n} row={row} constraint={s}: residual {}",
+                    product - expected
+                );
+            }
+        }
         for implicit in [0u32, 1] {
             let mode = Tensor::scalar(
                 &backend,

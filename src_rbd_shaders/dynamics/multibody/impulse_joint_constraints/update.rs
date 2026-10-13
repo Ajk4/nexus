@@ -61,6 +61,7 @@ pub(super) fn solve_mb_wj(
         tree_scratch,
         scratch_base,
         scratch_stride,
+        [u32::MAX; 2],
     );
 
     // Kinematic dofs are user-driven: the impulse must not move them.

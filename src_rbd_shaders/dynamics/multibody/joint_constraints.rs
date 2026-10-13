@@ -646,6 +646,14 @@ pub fn gpu_mb_build_joint_response_columns(
             * batch_ids.num_batches as usize
             + batch_id as usize,
         batch_ids.num_batches as usize,
+        [
+            cons._kind_extra & 0xffff,
+            if cons.coupling_coeff != 0. {
+                cons._kind_extra2 & 0xffff
+            } else {
+                u32::MAX
+            },
+        ],
     );
 }
 

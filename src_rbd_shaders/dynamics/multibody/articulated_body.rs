@@ -304,8 +304,48 @@ fn _eliminate(
     )
 }
 
+#[derive(Clone, Copy)]
+struct BackwardTraversal {
+    sources: [u32; 2],
+    sparse: bool,
+    remaining: u32,
+}
+
+impl BackwardTraversal {
+    #[inline(always)]
+    fn _next(&mut self, factors: &ISlice<u32>) -> u32 {
+        if self.sparse {
+            let mut sources = self.sources;
+            let k = if sources[0] == u32::MAX {
+                sources[1]
+            } else if sources[1] == u32::MAX {
+                sources[0]
+            } else {
+                sources[0].max(sources[1])
+            };
+            if k == u32::MAX {
+                return u32::MAX;
+            }
+            let parent = factors[k as usize * ARTICULATED_FACTOR_WORDS];
+            for i in 0..2 {
+                if sources[i] == k {
+                    sources[i] = parent;
+                }
+            }
+            self.sources = sources;
+            k
+        } else if self.remaining != 0 {
+            self.remaining -= 1;
+            self.remaining
+        } else {
+            u32::MAX
+        }
+    }
+}
+
 /// Backward elimination of each link's joint, followed by a forward solve.
 /// Scratch is caller-owned and separate for each simultaneous right-hand side.
+/// Sparse sources restrict the backward pass to their ancestor union.
 pub(super) fn _solve_tree(
     mb: &MultibodyInfo,
     factors: &ISlice<u32>,
@@ -315,12 +355,31 @@ pub(super) fn _solve_tree(
     scratch: &mut [f32],
     scratch_base: usize,
     scratch_stride: usize,
+    sources: [u32; 2],
 ) {
-    for i in 0..mb.num_links as usize * TREE_SCRATCH_WIDTH {
-        scratch.write(scratch_base + i * scratch_stride, 0.);
+    let mut traversal = BackwardTraversal {
+        sources,
+        sparse: sources[0] != u32::MAX,
+        remaining: mb.num_links,
+    };
+    let mut initialize = traversal;
+    loop {
+        let k = initialize._next(factors);
+        if k == u32::MAX {
+            break;
+        }
+        for i in 0..TREE_SCRATCH_WIDTH {
+            scratch.write(
+                scratch_base + (k as usize * TREE_SCRATCH_WIDTH + i) * scratch_stride,
+                0.,
+            );
+        }
     }
-    for reverse in 0..mb.num_links {
-        let k = mb.num_links - 1 - reverse;
+    loop {
+        let k = traversal._next(factors);
+        if k == u32::MAX {
+            break;
+        }
         let offset = k as usize * ARTICULATED_FACTOR_WORDS;
         let dof = factors[offset + 1];
         let ndofs = factors[offset + 2];
@@ -724,6 +783,7 @@ pub fn gpu_mb_solve_articulated_body(
         scratch,
         id.x as usize * batches.mb_max_links as usize * TREE_SCRATCH_WIDTH,
         1,
+        [u32::MAX; 2],
     );
 }
 
@@ -844,5 +904,6 @@ pub fn gpu_mb_apply_articulated_body_forces(
         scratch,
         base,
         scratch_stride,
+        [u32::MAX; 2],
     );
 }
