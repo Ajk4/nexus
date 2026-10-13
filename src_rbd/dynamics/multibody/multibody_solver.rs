@@ -5,13 +5,12 @@ use crate::math::Pose;
 use crate::queries::GpuIndexedContact;
 use crate::shaders::broad_phase::ContactPlan;
 use crate::shaders::dynamics::{
-    GpuMbApplyContactRestitution, GpuMbAssembleMassMatrix, GpuMbBuildContactDelassus,
-    GpuMbComputeDynamicsPre, GpuMbComputeSolveBounds, GpuMbConsOffsetsScan,
-    GpuMbCountContactConstraints, GpuMbDelayTick, GpuMbFinalizeContactConstraints,
-    GpuMbFinalizeImpulseJointConstraints, GpuMbFinalizeJointConstraints, GpuMbGravityAndLu,
-    GpuMbGravityAndLuT1, GpuMbGravityAndLuT8, GpuMbGravityAndLuT16, GpuMbGravityAndLuT32,
-    GpuMbInitContactConstraints, GpuMbInitJointConstraints, GpuMbIntegrate,
-    GpuMbIntegrateVelocities, GpuMbPublishState, GpuMbRefreshJointConstraints,
+    GpuMbApplyArticulatedBodyForces, GpuMbApplyContactRestitution, GpuMbBuildContactDelassus,
+    GpuMbComputeKinematics, GpuMbComputeSolveBounds, GpuMbConsOffsetsScan,
+    GpuMbCountContactConstraints, GpuMbDelayTick, GpuMbFactorArticulatedBody,
+    GpuMbFinalizeContactConstraints, GpuMbFinalizeImpulseJointConstraints,
+    GpuMbFinalizeJointConstraints, GpuMbInitContactConstraints, GpuMbInitJointConstraints,
+    GpuMbIntegrate, GpuMbIntegrateVelocities, GpuMbPublishState, GpuMbRefreshJointConstraints,
     GpuMbRemoveImpulseJointConstraintBias, GpuMbSavePrevConsBounds, GpuMbScatterContactIndex,
     GpuMbSeedContactRestitution, GpuMbSenseContactImpulses, GpuMbSnapshotContactWarmstart,
     GpuMbSolveConstraints, GpuMbSolveContactsDelassus, GpuMbSolveImpulseJointConstraints,
@@ -27,16 +26,9 @@ use vortx::tensor::Tensor;
 /// GPU shader bundle for multibody dynamics.
 #[derive(Shader)]
 pub struct GpuMultibodySolver {
-    // Five variants of the same function, selected by the per-batch DOF
-    // count, mainly to optimize small robots simulated across thousands
-    // of batches.
-    gravity_and_lu: GpuMbGravityAndLu,
-    gravity_and_lu_t1: GpuMbGravityAndLuT1,
-    gravity_and_lu_t8: GpuMbGravityAndLuT8,
-    gravity_and_lu_t16: GpuMbGravityAndLuT16,
-    gravity_and_lu_t32: GpuMbGravityAndLuT32,
-    compute_dynamics_pre: GpuMbComputeDynamicsPre,
-    assemble_mass_matrix: GpuMbAssembleMassMatrix,
+    compute_kinematics: GpuMbComputeKinematics,
+    factor_tree: GpuMbFactorArticulatedBody,
+    apply_forces: GpuMbApplyArticulatedBodyForces,
     init_joint_with_bias: GpuMbInitJointConstraints,
     /// M⁻¹-column back-solve for the joint constraints, split from the build
     /// pass so each fits 8 storage buffers.
@@ -91,7 +83,7 @@ pub struct GpuMultibodySolver {
     /// Restore that approach velocity once every substep is done.
     apply_contact_restitution: GpuMbApplyContactRestitution,
     update_impulse_joint_constraints: GpuMbUpdateImpulseJointConstraints,
-    /// Finalize pass for the impulse-joint build (LU back-solve + `inv_lhs`),
+    /// Finalize pass for the impulse-joint build (tree solve + `inv_lhs`),
     /// split out so the build pass fits 8 storage buffers.
     finalize_impulse_joint_constraints: GpuMbFinalizeImpulseJointConstraints,
     solve_impulse_joint_constraints: GpuMbSolveImpulseJointConstraints,
@@ -142,7 +134,7 @@ pub struct MultibodySolverArgs<'a> {
 }
 
 impl GpuMultibodySolver {
-    /// Runs FK → jacobians → mass matrix → gravity → LU solve in sequence on one pass.
+    /// Updates kinematics, factors the tree, and solves the applied forces.
     ///
     /// After completion, `mb.gen_accelerations()` holds `ẍ = M⁻¹ τ_g` (one per DOF).
     pub fn solve_gravity(
@@ -159,8 +151,8 @@ impl GpuMultibodySolver {
     }
 
     /// Once-per-visible-step setup. After this call, `gen_forces` holds the
-    /// generalized acceleration `a = M⁻¹ τ` and `mass_matrices` holds the LU
-    /// factors. The caller then runs the substep phases once per substep, with
+    /// generalized acceleration `a = M⁻¹ τ` and the tree factors are ready.
+    /// The caller then runs the substep phases once per substep, with
     /// the last call carrying `is_last_substep = true`.
     pub fn init_step(
         &self,
@@ -420,7 +412,7 @@ impl GpuMultibodySolver {
             drop(pass);
 
             // The M⁻¹-column back-solve is a separate dispatch: one kernel
-            // binding both the emission inputs and the LU factors would exceed
+            // binding both the emission inputs and the tree factors would exceed
             // the 8-storage-buffer budget.
             let mut pass =
                 encoder.begin_pass("[RBD] mbb/finalize-joint", timestamps.as_deref_mut());
@@ -430,8 +422,8 @@ impl GpuMultibodySolver {
                 &mb.multibody_info,
                 &mut mb.joint_constraints,
                 &mut mb.joint_constraint_columns,
-                &mb.mass_matrices,
-                &mb.lu_pivots,
+                &mb.tree_factors,
+                &mut mb.tree_scratch,
                 args.batch_indices,
             )?;
         }
@@ -465,8 +457,8 @@ impl GpuMultibodySolver {
                 &mut pass,
                 args.mb_sweep_indirect,
                 &mb.multibody_info,
-                &mb.mass_matrices,
-                &mb.lu_pivots,
+                &mb.tree_factors,
+                &mut mb.tree_scratch,
                 &mut mb.contact_constraints,
                 &mut mb.contact_jac_cols,
                 &mb.links_static,
@@ -622,7 +614,7 @@ impl GpuMultibodySolver {
                 args.poses,
                 args.mprops,
             )?;
-            // Finalize pass: LU back-solve `M⁻¹·Jᵀ` for the multibody sides and
+            // Finalize pass: tree solve `M⁻¹·Jᵀ` for the multibody sides and
             // compute `inv_lhs` (split out so the build pass above fits 8
             // storage buffers).
             self.finalize_impulse_joint_constraints.call(
@@ -633,8 +625,8 @@ impl GpuMultibodySolver {
                 &mut mb.mb_imp_joint_jacobians,
                 args.batch_indices,
                 &mb.multibody_info,
-                &mb.mass_matrices,
-                &mb.lu_pivots,
+                &mb.tree_factors,
+                &mut mb.tree_scratch,
                 &mb.links_static,
             )?;
             // Colored PGS iteration WITH bias: one dispatch per color, each
@@ -837,7 +829,7 @@ impl GpuMultibodySolver {
         )
     }
 
-    /// Recompute the dynamics (mass matrix, LU factors, generalized
+    /// Recompute the dynamics (tree factors, generalized
     /// acceleration). After this call, `gen_forces` holds the generalized
     /// acceleration `a` for the *next* substep's velocity update.
     fn compute_dynamics(
@@ -858,7 +850,7 @@ impl GpuMultibodySolver {
              RbdState::set_implicit_coriolis, not GpuMultibodySet's"
         );
         let pre_dispatch = mb.packed_wg_dispatch();
-        self.compute_dynamics_pre.call(
+        self.compute_kinematics.call(
             pass,
             pre_dispatch,
             &mb.multibody_info,
@@ -866,74 +858,36 @@ impl GpuMultibodySolver {
             &mut mb.links_workspace,
             args.poses,
             &mut mb.body_jacobians,
-            &mut mb.coriolis_packed,
             &mb.dof_state,
             args.batch_indices,
         )?;
 
-        self.assemble_mass_matrix.call(
+        self.factor_tree.call(
             pass,
-            [
-                (mb.max_ndofs * mb.max_ndofs).max(1),
-                mb.multibodies_per_batch * mb.num_batches,
-                1,
-            ],
+            mb.flat_mb_dispatch(),
             &mb.multibody_info,
             &mb.links_static,
             &mb.links_workspace,
-            &mb.body_jacobians,
-            &mb.coriolis_packed,
             &mb.dof_state,
-            &mut mb.mass_matrices,
+            &mut mb.tree_factors,
             &mb.dt,
             args.batch_indices,
         )?;
 
-        // Fused gravity + LU factor + LU solve. Select an implementation based on how many
-        // environments we can pack on the same workgroup (depending on its dofs).
-        macro_rules! grav_lu {
-            ($kernel:ident) => {
-                self.$kernel.call(
-                    pass,
-                    mb.packed_wg_dispatch(),
-                    &mb.multibody_info,
-                    &mb.links_static,
-                    &mut mb.links_workspace,
-                    &mb.body_jacobians,
-                    &mut mb.gen_forces,
-                    &mut mb.mass_matrices,
-                    &mut mb.lu_pivots,
-                    &mb.dof_state,
-                    args.gravity,
-                    args.batch_indices,
-                    &mb.dt,
-                )?
-            };
-        }
-        match mb.pack_lanes() {
-            1 => grav_lu!(gravity_and_lu_t1),
-            8 => grav_lu!(gravity_and_lu_t8),
-            16 => grav_lu!(gravity_and_lu_t16),
-            32 => grav_lu!(gravity_and_lu_t32),
-            _ => {
-                let grav_lu_dispatch = [mb.multibodies_per_batch * MB_LU_LANES, mb.num_batches, 1];
-                self.gravity_and_lu.call(
-                    pass,
-                    grav_lu_dispatch,
-                    &mb.multibody_info,
-                    &mb.links_static,
-                    &mut mb.links_workspace,
-                    &mb.body_jacobians,
-                    &mut mb.gen_forces,
-                    &mut mb.mass_matrices,
-                    &mut mb.lu_pivots,
-                    &mb.dof_state,
-                    args.gravity,
-                    args.batch_indices,
-                    &mb.dt,
-                )?;
-            }
-        }
+        self.apply_forces.call(
+            pass,
+            mb.flat_mb_dispatch(),
+            &mb.multibody_info,
+            &mb.links_static,
+            &mut mb.links_workspace,
+            &mb.dof_state,
+            &mb.tree_factors,
+            &mut mb.gen_forces,
+            &mut mb.tree_scratch,
+            &mb.dt,
+            args.gravity,
+            args.batch_indices,
+        )?;
 
         Ok(())
     }

@@ -2,10 +2,10 @@
 
 use super::multibody_set::*;
 use crate::shaders::dynamics::{
-    ConstraintSoftness, MAX_AXIS_CONSTRAINTS, MAX_MB_CONTACT_CONSTRAINTS_PER_MB, MbDelayTickParams,
-    MbDofCoupling, MbImpulseJointBuilder, MbImpulseJointConstraint, MultibodyContactConstraint,
-    MultibodyInfo, MultibodyJointConstraint, MultibodyLinkStatic, MultibodyLinkWorkspace,
-    RbdSimParams, SPATIAL_DIM,
+    ArticulatedBodyFactor, ConstraintSoftness, MAX_AXIS_CONSTRAINTS,
+    MAX_MB_CONTACT_CONSTRAINTS_PER_MB, MbDelayTickParams, MbDofCoupling, MbImpulseJointBuilder,
+    MbImpulseJointConstraint, MultibodyContactConstraint, MultibodyInfo, MultibodyJointConstraint,
+    MultibodyLinkStatic, MultibodyLinkWorkspace, RbdSimParams, SPATIAL_DIM, TREE_SCRATCH_WIDTH,
 };
 use crate::shaders::utils::linalg::MAX_MB_DOFS;
 use khal::BufferUsages;
@@ -621,27 +621,25 @@ impl GpuMultibodySet {
                 storage,
             )
             .unwrap(),
-            mass_matrices: Tensor::vector(
+            tree_factors: Tensor::vector(
                 backend,
-                // Two sections: the plain matrix (constraint LU) at intra-batch
-                // offset 0 and the coriolis-melded acceleration matrix at intra-batch
-                // offset `mm_cap`.
-                vec![0.0f32; (2 * mm_cap * num_batches) as usize],
+                bytemuck::zeroed_vec::<ArticulatedBodyFactor>((links_cap * num_batches) as usize),
                 storage,
             )
             .unwrap(),
-            lu_pivots: Tensor::vector(
+            tree_scratch: Tensor::vector(
                 backend,
-                vec![0u32; (dofs_cap * num_batches) as usize],
+                vec![
+                    0f32;
+                    contact_cons_cap
+                        .max(cons_cap * num_batches)
+                        .max(mb_cap * num_batches) as usize
+                        * max_mb_links.max(1) as usize
+                        * TREE_SCRATCH_WIDTH
+                ],
                 storage,
             )
             .unwrap(),
-            coriolis_packed: {
-                // Linear and angular blocks have DIM and ANG_DIM rows.
-                let a = (cor_cap * num_batches) as usize;
-                let w = a / crate::math::DIM * crate::shaders::ANG_DIM as usize;
-                Tensor::vector(backend, vec![0.0f32; a + w], storage).unwrap()
-            },
             joint_constraints: Tensor::vector(
                 backend,
                 vec![MultibodyJointConstraint::default(); (cons_cap * num_batches) as usize],

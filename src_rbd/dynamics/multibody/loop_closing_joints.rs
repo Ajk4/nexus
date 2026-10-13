@@ -320,6 +320,7 @@ impl GpuMultibodySet {
         .unwrap();
         self.mb_imp_joints_per_batch = joints_cap;
         self.mb_imp_joint_constraints_per_batch = cons_cap;
+        self._resize_tree_scratch(backend);
         self.mb_imp_joint_jacobians_per_batch = jac_cap;
 
         // Color-groups buffer, color-major interleaved (`color * nb + batch`).

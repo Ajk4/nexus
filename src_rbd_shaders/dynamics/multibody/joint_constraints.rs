@@ -11,10 +11,11 @@ use khal_std::iter::StepRng;
 use khal_std::macros::{spirv, spirv_bindgen};
 use khal_std::sync::control_barrier;
 
+use super::articulated_body::{_solve_tree, ArticulatedBodyFactor, TREE_SCRATCH_WIDTH};
 use crate::dynamics::ConstraintSoftness;
 use crate::dynamics::joint::SPATIAL_DIM;
 use crate::utils::BatchIndices;
-use crate::utils::linalg::{MatSlice, VSlice, lu_solve_in_place};
+use crate::utils::linalg::VSlice;
 use crate::{DIM, MAX_FLT};
 
 use super::types::{
@@ -71,35 +72,6 @@ fn motor_params(motor: &crate::dynamics::joint::JointMotor, dt: f32) -> (f32, f3
         inv_dt,
         mp.max_impulse,
     )
-}
-
-/// Solve `M · x = J` in place (writes `x` into `dst[0..n]`) where `J =
-/// e_{dof_id} − coeff·e_{dof2_id}` (a plain unit rhs when `coeff == 0`).
-/// Uses the same LU factor + pivots produced by `gpu_mb_lu_decompose`.
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn lu_solve_unit(
-    buf_m: &[f32],
-    m: MatSlice,
-    buf_pivots: &[u32],
-    piv: VSlice,
-    dst: &mut [f32],
-    dst_offset: usize,
-    dof_id: u32,
-    dof2_id: u32,
-    coeff: f32,
-) {
-    let n = m.rows;
-    // dst[0..n] := e_{dof_id} − coeff·e_{dof2_id} (then permuted by
-    // lu_solve_in_place).
-    for i in 0..n {
-        let mut v = if i == dof_id { 1.0 } else { 0.0 };
-        if i == dof2_id {
-            v -= coeff;
-        }
-        dst[dst_offset + i as usize] = v;
-    }
-    lu_solve_in_place(buf_m, m, buf_pivots, piv, dst, VSlice::dense(dst_offset));
 }
 
 /// Serially writes the metadata of every active limit/motor constraint slot.
@@ -309,42 +281,6 @@ fn emit_joint_constraints(
             slot += 1;
         }
     }
-}
-
-/// Solve `M · column = J` (writes the `M⁻¹·J` column) and return the raw
-/// `lhs = J·M⁻¹·J`, for `J = e_{dof_id} − coeff·e_{dof2_id}` (`coeff == 0`
-/// for limit / motor rows).
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn compute_constraint_column(
-    joint_constraint_columns: &mut [f32],
-    col_base: usize,
-    slot: u32,
-    dofs_stride: usize,
-    ndofs: u32,
-    dof_id: u32,
-    dof2_id: u32,
-    coeff: f32,
-    mass_matrices: &[f32],
-    m: MatSlice,
-    lu_pivots: &[u32],
-    piv: VSlice,
-) -> f32 {
-    let _ = ndofs;
-    let col_offset = col_base + (slot as usize) * dofs_stride;
-    lu_solve_unit(
-        mass_matrices,
-        m,
-        lu_pivots,
-        piv,
-        joint_constraint_columns,
-        col_offset,
-        dof_id,
-        dof2_id,
-        coeff,
-    );
-    joint_constraint_columns.read(col_offset + dof_id as usize)
-        - coeff * joint_constraint_columns.read(col_offset + dof2_id as usize)
 }
 
 /// `1 / x`, or 0 when `x == 0` — matches rapier's `crate::utils::inv`.
@@ -654,8 +590,9 @@ pub fn gpu_mb_finalize_joint_constraints(
     joint_constraints: &mut [MultibodyJointConstraint],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)]
     joint_constraint_columns: &mut [f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] mass_matrices: &[f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] lu_pivots: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)]
+    tree_factors: &[ArticulatedBodyFactor],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] tree_scratch: &mut [f32],
     #[spirv(uniform, descriptor_set = 0, binding = 5)] batch_ids: &BatchIndices,
 ) {
     const LANES: u32 = 64;
@@ -679,16 +616,13 @@ pub fn gpu_mb_finalize_joint_constraints(
     }
     let active = in_range && ndofs != 0;
 
-    let piv = VSlice::dense(batch_ids.mb_region(batch_id, mb.first_dof, ndofs));
     let cons_base = batch_ids.mb_joint_constraints_start(batch_id) + mb.first_constraint as usize;
     let dofs_stride = batch_ids.dof_batch_capacity as usize;
     let col_base = batch_ids.mb_joint_constraint_columns_start(batch_id)
         + (mb.first_constraint as usize) * dofs_stride;
-    let m = MatSlice::dense(
-        batch_ids.mb_region(batch_id, mb.mass_matrix_offset, ndofs * ndofs),
-        ndofs,
-        ndofs,
-    );
+    let factors = batch_ids
+        .ib(batch_id, tree_factors)
+        .offset(mb.first_link as usize);
 
     if active {
         for s in StepRng::new(lane..mb.max_constraints, LANES) {
@@ -696,20 +630,29 @@ pub fn gpu_mb_finalize_joint_constraints(
             if cons.kind == 0 {
                 continue;
             }
-            let lhs = compute_constraint_column(
+            let column = col_base + s as usize * dofs_stride;
+            for d in 0..ndofs {
+                let value = if d == cons.dof_id { 1. } else { 0. }
+                    - if d == cons.dof2_id {
+                        cons.coupling_coeff
+                    } else {
+                        0.
+                    };
+                joint_constraint_columns.write(column + d as usize, value);
+            }
+            _solve_tree(
+                &mb,
+                &factors,
+                false,
                 joint_constraint_columns,
-                col_base,
-                s,
-                dofs_stride,
-                ndofs,
-                cons.dof_id,
-                cons.dof2_id,
-                cons.coupling_coeff,
-                mass_matrices,
-                m,
-                lu_pivots,
-                piv,
+                VSlice::dense(column),
+                tree_scratch,
+                (cons_base + s as usize) * batch_ids.mb_max_links as usize * TREE_SCRATCH_WIDTH,
+                1,
             );
+            let lhs = joint_constraint_columns.read(column + cons.dof_id as usize)
+                - cons.coupling_coeff
+                    * joint_constraint_columns.read(column + cons.dof2_id as usize);
             let cfm_gain = lhs * cons.cfm_coeff + cons.cfm_gain;
             cons.cfm_gain = cfm_gain;
             cons.inv_lhs = inv(lhs + cfm_gain);

@@ -104,8 +104,9 @@ pub fn gpu_mb_finalize_impulse_joint_constraints(
     constraints: &mut [MbImpulseJointConstraint],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] jacobians: &mut [f32],
     #[spirv(storage_buffer, descriptor_set = 1, binding = 0)] multibody_info: &[MultibodyInfo],
-    #[spirv(storage_buffer, descriptor_set = 1, binding = 1)] mass_matrices: &[f32],
-    #[spirv(storage_buffer, descriptor_set = 1, binding = 2)] lu_pivots: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 1, binding = 1)]
+    tree_factors: &[super::super::articulated_body::ArticulatedBodyFactor],
+    #[spirv(storage_buffer, descriptor_set = 1, binding = 2)] tree_scratch: &mut [f32],
     #[spirv(storage_buffer, descriptor_set = 1, binding = 3)]
     links_static: &[MultibodyLinkStatic],
     #[spirv(uniform, descriptor_set = 0, binding = 3)] batch_ids: &BatchIndices,
@@ -137,8 +138,12 @@ pub fn gpu_mb_finalize_impulse_joint_constraints(
                             c.j_id_a,
                             c.ndofs_a,
                             &mb,
-                            mass_matrices,
-                            lu_pivots,
+                            tree_factors,
+                            tree_scratch,
+                            cons_idx
+                                * batch_ids.mb_max_links as usize
+                                * super::super::articulated_body::TREE_SCRATCH_WIDTH,
+                            1,
                             links_static,
                             il,
                         );
@@ -150,8 +155,12 @@ pub fn gpu_mb_finalize_impulse_joint_constraints(
                             c.j_id_b,
                             c.ndofs_b,
                             &mb,
-                            mass_matrices,
-                            lu_pivots,
+                            tree_factors,
+                            tree_scratch,
+                            cons_idx
+                                * batch_ids.mb_max_links as usize
+                                * super::super::articulated_body::TREE_SCRATCH_WIDTH,
+                            1,
                             links_static,
                             il,
                         );

@@ -5,9 +5,10 @@ use crate::math::Pose;
 use crate::rapier::prelude::JointAxis;
 use crate::shaders::dynamics::SPATIAL_DIM;
 use crate::shaders::dynamics::{
-    ConstraintSoftness, LocalMassProperties, MbDelayStateParams, MbDelayTickParams, MbDofCoupling,
-    MbImpulseJointBuilder, MbImpulseJointConstraint, MultibodyContactConstraint, MultibodyInfo,
-    MultibodyJointConstraint, MultibodyLinkStatic, MultibodyLinkWorkspace, RbdSimParams,
+    ArticulatedBodyFactor, ConstraintSoftness, LocalMassProperties, MbDelayStateParams,
+    MbDelayTickParams, MbDofCoupling, MbImpulseJointBuilder, MbImpulseJointConstraint,
+    MultibodyContactConstraint, MultibodyInfo, MultibodyJointConstraint, MultibodyLinkStatic,
+    MultibodyLinkWorkspace, RbdSimParams, TREE_SCRATCH_WIDTH,
 };
 use crate::shaders::utils::BatchIndices;
 use khal::BufferUsages;
@@ -92,8 +93,8 @@ pub struct GpuMultibodySet {
     /// joint rhs / limit activity, which is cheaper and closer to how MuJoCo
     /// and Genesis step.
     pub(super) substep_refresh: bool,
-    /// Split cadence: refresh the constraints every substep but keep the mass
-    /// matrix and its LU factors per step. Ignored when `substep_refresh` is on.
+    /// Split cadence: refresh the constraints every substep but keep the tree
+    /// factors per step. Ignored when `substep_refresh` is on.
     pub(super) substep_refresh_light: bool,
     /// When `false` (no joint limits / motors anywhere), the joint constraint
     /// kernel chain is skipped on the host side.
@@ -130,13 +131,9 @@ pub struct GpuMultibodySet {
     pub(super) gen_forces: Tensor<f32>,
     /// Per-link `SPATIAL_DIM × ndofs` column-major jacobians.
     pub(super) body_jacobians: Tensor<f32>,
-    /// Per-multibody `ndofs × ndofs` mass matrices (also used as LU work buffer).
-    pub(super) mass_matrices: Tensor<f32>,
-    /// Per-DOF pivot buffer used by LU.
-    pub(super) lu_pivots: Tensor<u32>,
-
-    /// Packed buffer holding the three Coriolis scratch sections back-to-back.
-    pub(super) coriolis_packed: Tensor<f32>,
+    pub(super) tree_factors: Tensor<ArticulatedBodyFactor>,
+    /// Reused across sequential solves; concurrent right-hand sides own disjoint slots.
+    pub(super) tree_scratch: Tensor<f32>,
 
     /// Per-multibody flat bank of unit (1-DOF) limit / motor constraints.
     pub(super) joint_constraints: Tensor<MultibodyJointConstraint>,
@@ -338,7 +335,7 @@ impl GpuMultibodySet {
         self.substep_refresh
     }
 
-    /// Sets the split cadence: constraints per substep, mass matrix and LU per
+    /// Sets the split cadence: constraints per substep, tree factors per
     /// step. Ignored while [`Self::substep_refresh`] is on.
     pub fn set_substep_refresh_light(&mut self, enabled: bool) {
         self.substep_refresh_light = enabled;
@@ -905,6 +902,25 @@ impl GpuMultibodySet {
         self.contact_jac_cols =
             Tensor::vector(backend, vec![0.0f32; 2 * cols as usize], storage).unwrap();
         self.contact_constraints_capacity = n;
+        self._resize_tree_scratch(backend);
+    }
+
+    pub(super) fn _resize_tree_scratch(&mut self, backend: &GpuBackend) {
+        let slots = self
+            .contact_constraints
+            .len()
+            .max(self.joint_constraints.len())
+            .max(self.mb_imp_joint_constraints.len())
+            .max(self.multibody_info.len());
+        let required = slots as usize * self.max_links.max(1) as usize * TREE_SCRATCH_WIDTH;
+        if required > self.tree_scratch.len() as usize {
+            self.tree_scratch = Tensor::vector(
+                backend,
+                vec![0f32; required],
+                BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            )
+            .unwrap();
+        }
     }
 
     /// The per-multibody bank of unit (1-DoF) joint limit / motor constraints.
@@ -992,6 +1008,7 @@ impl GpuMultibodySet {
         self.joint_constraint_columns_per_batch = cons_col_cap;
         self.max_joint_constraints = max_constraints;
         self.has_joint_constraints = max_constraints > 0;
+        self._resize_tree_scratch(backend);
         // `BatchIndices` now disagrees with these capacities. `RbdState::
         // set_dof_frictionloss` rebuilds it immediately; for callers who came
         // in through `GpuMultibodySet` directly, the next step does.
@@ -1189,15 +1206,8 @@ impl GpuMultibodySet {
         &self.body_jacobians
     }
 
-    /// Per-multibody `ndofs × ndofs` mass matrices, indexed from each
-    /// multibody's [`MultibodyInfo::mass_matrix_offset`]. Doubles as the LU work
-    /// buffer, so after a step this holds the factorization, not `M` itself.
-    pub fn mass_matrices(&self) -> &Tensor<f32> {
-        &self.mass_matrices
-    }
-
     #[cfg(test)]
-    pub(crate) fn _core_allocation_sizes(&self) -> [(&'static str, usize); 8] {
+    pub(crate) fn _core_allocation_sizes(&self) -> [(&'static str, usize); 7] {
         use core::mem::size_of;
         [
             (
@@ -1218,14 +1228,13 @@ impl GpuMultibodySet {
                 self.body_jacobians.len() as usize * size_of::<f32>(),
             ),
             (
-                "mass_matrices",
-                self.mass_matrices.len() as usize * size_of::<f32>(),
+                "tree_factors",
+                self.tree_factors.len() as usize * size_of::<ArticulatedBodyFactor>(),
             ),
             (
-                "coriolis",
-                self.coriolis_packed.len() as usize * size_of::<f32>(),
+                "tree_scratch",
+                self.tree_scratch.len() as usize * size_of::<f32>(),
             ),
-            ("pivots", self.lu_pivots.len() as usize * size_of::<u32>()),
         ]
     }
 

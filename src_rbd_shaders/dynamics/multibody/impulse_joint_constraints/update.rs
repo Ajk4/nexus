@@ -4,9 +4,10 @@
 use glamx::Vec4;
 use khal_std::index::MaybeIndexUnchecked;
 
+use super::super::articulated_body::{_solve_tree, ArticulatedBodyFactor};
 use crate::dynamics::body::WorldMassProperties;
 use crate::dynamics::joint::{ANG_AXES_MASK, LIN_AXES_MASK, SPATIAL_DIM};
-use crate::utils::linalg::{MatSlice, VSlice, lu_solve_in_place};
+use crate::utils::linalg::VSlice;
 use crate::utils::{BodyIx, ISlice};
 use crate::{DIM, Pose};
 
@@ -27,8 +28,10 @@ pub(super) fn solve_mb_wj(
     j_id: u32,
     ndofs: u32,
     mb: &MultibodyInfo,
-    mass_matrices: &[f32],
-    lu_pivots: &[u32],
+    tree_factors: &[ArticulatedBodyFactor],
+    tree_scratch: &mut [f32],
+    scratch_base: usize,
+    scratch_stride: usize,
     links_static: &[MultibodyLinkStatic],
     // Interleaved dynamics-buffer view (`stride = num_batches`, `shift =
     // batch_id`).
@@ -43,22 +46,21 @@ pub(super) fn solve_mb_wj(
     }
     // Dense per-multibody-region views (`il` carries `num_batches` /
     // `batch_id` as stride / shift).
-    let m = MatSlice::dense(
-        mb.mass_matrix_offset as usize * il.stride as usize
-            + il.shift as usize * (ndofs * ndofs) as usize,
-        ndofs,
-        ndofs,
-    );
-    let piv = VSlice::dense(
-        mb.first_dof as usize * il.stride as usize + il.shift as usize * ndofs as usize,
-    );
-    lu_solve_in_place(
-        mass_matrices,
-        m,
-        lu_pivots,
-        piv,
+    let factors = ISlice {
+        buf: tree_factors,
+        base: mb.first_link as usize,
+        stride: il.stride,
+        shift: il.shift,
+    };
+    _solve_tree(
+        mb,
+        &factors,
+        false,
         jacobians,
         VSlice::dense(wj_base),
+        tree_scratch,
+        scratch_base,
+        scratch_stride,
     );
 
     // Kinematic dofs are user-driven: the impulse must not move them.

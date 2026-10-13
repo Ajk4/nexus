@@ -49,6 +49,86 @@ fn packed_decode(wg_id: UVec3, lid: UVec3, batch_ids: &BatchIndices) -> (u32, u3
     (t, lane, batch_id, mb_idx, active_slot)
 }
 
+fn _prepare_kinematics(
+    mb: &MultibodyInfo,
+    stat: &ISlice<MultibodyLinkStatic>,
+    velocities: &ISlice<f32>,
+    poses: &mut ISliceMut<Pose>,
+    workspace: &mut [Vec4],
+    wa: WsAddr,
+    jacobians: &mut [f32],
+    jac0: usize,
+    lane: u32,
+    lanes: u32,
+    max_links: u32,
+    active: bool,
+) {
+    if active && mb.num_links > 0 && lane == 0 {
+        _forward_kinematics(mb, stat, poses, workspace, wa, mb.num_links);
+    }
+    sync_slots(lanes);
+    update_body_jacobians(
+        lane,
+        lanes,
+        jac0,
+        mb.ndofs,
+        mb.num_links,
+        max_links,
+        stat,
+        workspace,
+        wa,
+        jacobians,
+    );
+    if active && mb.num_links > 0 && lane == 0 {
+        _propagate_velocities(mb.num_links, stat, velocities, workspace, wa);
+    }
+    sync_slots(lanes);
+}
+
+#[spirv_bindgen(force_cpu_coroutines)]
+#[spirv(compute(threads(64)))]
+pub fn gpu_mb_compute_kinematics(
+    #[spirv(workgroup_id)] wg: UVec3,
+    #[spirv(local_invocation_id)] lid: UVec3,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] infos: &[MultibodyInfo],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] links: &[MultibodyLinkStatic],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] workspace: &mut [Vec4],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] poses: &mut [Pose],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] jacobians: &mut [f32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] dofs: &[f32],
+    #[spirv(uniform, descriptor_set = 0, binding = 6)] batches: &BatchIndices,
+) {
+    let (lanes, lane, batch, index, active) = packed_decode(wg, lid, batches);
+    let mb = if active {
+        batches.ib(batch, infos).read(index as usize)
+    } else {
+        MultibodyInfo::default()
+    };
+    let stat = batches.ib(batch, links).offset(mb.first_link as usize);
+    let velocities = batches.ib(batch, dofs).offset(mb.first_dof as usize);
+    let mut poses = batches.ib_mut(batch, poses);
+    let wa = WsAddr::new(mb.first_link as usize, batches.num_batches, batch);
+    let jac0 = batches.mb_region(
+        batch,
+        mb.jacobian_offset,
+        mb.num_links * SPATIAL_DIM as u32 * mb.ndofs,
+    );
+    _prepare_kinematics(
+        &mb,
+        &stat,
+        &velocities,
+        &mut poses,
+        workspace,
+        wa,
+        jacobians,
+        jac0,
+        lane,
+        lanes,
+        batches.mb_max_links,
+        active,
+    );
+}
+
 /// Fused FK, body Jacobians, velocity propagation, and Coriolis derivatives.
 /// Coriolis blocks run only when implicit coriolis is enabled (non-zero
 /// `mass_matrix_acc_section_offset`).
@@ -97,38 +177,20 @@ pub fn gpu_mb_compute_dynamics_pre(
     let mut poses_slice = batch_ids.ib_mut(batch_id, poses);
     let vel_slice = batch_ids.ib(batch_id, dof_state).offset(vel_base);
 
-    // 1) Forward Kinematics (single-threaded)
-    if active_slot && num_links > 0 && lane == 0 {
-        _forward_kinematics(
-            &mb,
-            &stat_slice,
-            &mut poses_slice,
-            links_workspace,
-            wa,
-            num_links,
-        );
-    }
-    sync_slots(t);
-
-    // 2) Update body jacobians
-    update_body_jacobians(
-        lane,
-        t,
-        jac0,
-        ndofs,
-        num_links,
-        batch_ids.mb_max_links,
+    _prepare_kinematics(
+        &mb,
         &stat_slice,
+        &vel_slice,
+        &mut poses_slice,
         links_workspace,
         wa,
         body_jacobians,
+        jac0,
+        lane,
+        t,
+        batch_ids.mb_max_links,
+        active_slot,
     );
-
-    // 3) Propagate velocities (single-threaded)
-    if active_slot && num_links > 0 && lane == 0 {
-        _propagate_velocities(num_links, &stat_slice, &vel_slice, links_workspace, wa);
-    }
-    sync_slots(t);
 
     let acc_section = batch_ids.mass_matrix_acc_section_offset;
     let split = acc_section != 0;

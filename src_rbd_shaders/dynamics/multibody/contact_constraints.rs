@@ -20,13 +20,14 @@ use khal_std::iter::StepRng;
 use khal_std::macros::{spirv, spirv_bindgen};
 use khal_std::sync::{atomic_add_u32, atomic_load_u32, workgroup_memory_barrier_with_group_sync};
 
+use super::articulated_body::{_solve_tree, ArticulatedBodyFactor, TREE_SCRATCH_WIDTH};
 use crate::broad_phase::ContactPlan;
 use crate::dynamics::ConstraintSoftness;
 use crate::dynamics::body::{Velocity, WorldMassProperties};
 use crate::dynamics::joint::SPATIAL_DIM;
 use crate::queries::IndexedManifold;
 use crate::utils::BatchIndices;
-use crate::utils::linalg::{MAX_MB_DOFS, MatSlice, VSlice, lu_solve_in_place};
+use crate::utils::linalg::{MAX_MB_DOFS, MatSlice, VSlice};
 use crate::{ANG_DIM, AngVector, DIM, Pose, Vector, gcross, gdot};
 
 use super::types::{
@@ -915,8 +916,9 @@ pub fn gpu_mb_finalize_contact_constraints(
     #[spirv(workgroup_id)] workgroup_id: UVec3,
     #[spirv(local_invocation_id)] local_id: UVec3,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] multibody_info: &[MultibodyInfo],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] mass_matrices: &[f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] lu_pivots: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)]
+    tree_factors: &[ArticulatedBodyFactor],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] tree_scratch: &mut [f32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)]
     contact_constraints: &mut [MultibodyContactConstraint],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] contact_jac_cols: &mut [f32],
@@ -944,16 +946,13 @@ pub fn gpu_mb_finalize_contact_constraints(
         mb.jacobian_offset,
         mb.num_links * SPATIAL_DIM as u32 * ndofs,
     );
-    let piv = VSlice::dense(batch_ids.mb_region(batch_id, mb.first_dof, ndofs));
     let cons_base = mb.contact_constraint_start as usize;
     let dofs_stride = batch_ids.dof_batch_capacity as usize;
     let jc_base = cons_base * 2 * dofs_stride;
 
-    let m = MatSlice::dense(
-        batch_ids.mb_region(batch_id, mb.mass_matrix_offset, ndofs * ndofs),
-        ndofs,
-        ndofs,
-    );
+    let factors = batch_ids
+        .ib(batch_id, tree_factors)
+        .offset(mb.first_link as usize);
     let count = mb.contact_constraint_count;
     let stat_slice = batch_ids
         .ib(batch_id, links_static)
@@ -999,13 +998,15 @@ pub fn gpu_mb_finalize_contact_constraints(
             contact_jac_cols.write(col_offset + i as usize, v);
         }
         // 3) Solve M · column = J^T  (in place).
-        lu_solve_in_place(
-            mass_matrices,
-            m,
-            lu_pivots,
-            piv,
+        _solve_tree(
+            &mb,
+            &factors,
+            false,
             contact_jac_cols,
             VSlice::dense(col_offset),
+            tree_scratch,
+            (cons_base + s as usize) * batch_ids.mb_max_links as usize * TREE_SCRATCH_WIDTH,
+            1,
         );
         // 3b) Kinematic dofs are user-driven: the impulse must not move them.
         zero_kinematic_dofs(contact_jac_cols, col_offset, &stat_slice, mb.num_links);
