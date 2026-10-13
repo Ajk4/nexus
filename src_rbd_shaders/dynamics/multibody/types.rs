@@ -407,9 +407,6 @@ pub struct MultibodyContactConstraint {
     pub torque_a: f32,
     /// Same for the `link_id_b` side of a self-contact, crossed with `lin_jac`.
     pub torque_b: f32,
-    /// Pads the struct to a multiple of 16 bytes, which std430 requires of the
-    /// array stride given the vector members.
-    pub _pad1: [f32; 2],
 }
 
 /// Descriptor for one multibody: where its links live, how many DOFs it has, and

@@ -649,7 +649,6 @@ pub fn gpu_mb_init_contact_constraints(
                 local_p1,
                 local_p2,
                 base_dist,
-                _pad1: [0.0; 2],
             };
             if lane == 0 {
                 contact_constraints.write(cons_base + normal_slot as usize, normal_cons);
@@ -788,7 +787,6 @@ pub fn gpu_mb_init_contact_constraints(
                     local_p1,
                     local_p2,
                     base_dist,
-                    _pad1: [0.0; 2],
                 };
                 if lane == 0 {
                     contact_constraints.write(cons_base + tang_slot as usize, tang_cons);
