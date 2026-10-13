@@ -104,8 +104,7 @@ pub fn gpu_mb_finalize_impulse_joint_constraints(
     constraints: &mut [MbImpulseJointConstraint],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] jacobians: &mut [f32],
     #[spirv(storage_buffer, descriptor_set = 1, binding = 0)] multibody_info: &[MultibodyInfo],
-    #[spirv(storage_buffer, descriptor_set = 1, binding = 1)]
-    tree_factors: &[super::super::articulated_body::ArticulatedBodyFactor],
+    #[spirv(storage_buffer, descriptor_set = 1, binding = 1)] tree_factors: &[u32],
     #[spirv(storage_buffer, descriptor_set = 1, binding = 2)] tree_scratch: &mut [f32],
     #[spirv(storage_buffer, descriptor_set = 1, binding = 3)]
     links_static: &[MultibodyLinkStatic],

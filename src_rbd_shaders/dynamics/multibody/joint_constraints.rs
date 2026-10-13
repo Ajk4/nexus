@@ -11,7 +11,7 @@ use khal_std::iter::StepRng;
 use khal_std::macros::{spirv, spirv_bindgen};
 use khal_std::sync::control_barrier;
 
-use super::articulated_body::{_solve_tree, ArticulatedBodyFactor, TREE_SCRATCH_WIDTH};
+use super::articulated_body::{_solve_tree, ARTICULATED_FACTOR_WORDS, TREE_SCRATCH_WIDTH};
 use crate::dynamics::ConstraintSoftness;
 use crate::dynamics::joint::SPATIAL_DIM;
 use crate::utils::BatchIndices;
@@ -583,8 +583,7 @@ pub fn gpu_mb_finalize_joint_constraints(
     joint_constraints: &mut [MultibodyJointConstraint],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)]
     joint_constraint_columns: &mut [f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)]
-    tree_factors: &[ArticulatedBodyFactor],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] tree_factors: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] tree_scratch: &mut [f32],
     #[spirv(uniform, descriptor_set = 0, binding = 5)] batch_ids: &BatchIndices,
 ) {
@@ -605,7 +604,7 @@ pub fn gpu_mb_finalize_joint_constraints(
     let dofs_stride = batch_ids.dof_batch_capacity as usize;
     let factors = batch_ids
         .ib(batch_id, tree_factors)
-        .offset(mb.first_link as usize);
+        .offset(mb.first_link as usize * ARTICULATED_FACTOR_WORDS);
 
     let mut cons = joint_constraints.read(cons_base + s as usize);
     if cons.kind == 0 {

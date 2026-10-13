@@ -4,7 +4,7 @@
 use glamx::Vec4;
 use khal_std::index::MaybeIndexUnchecked;
 
-use super::super::articulated_body::{_solve_tree, ArticulatedBodyFactor};
+use super::super::articulated_body::{_solve_tree, ARTICULATED_FACTOR_WORDS};
 use crate::dynamics::body::WorldMassProperties;
 use crate::dynamics::joint::{ANG_AXES_MASK, LIN_AXES_MASK, SPATIAL_DIM};
 use crate::utils::linalg::VSlice;
@@ -28,7 +28,7 @@ pub(super) fn solve_mb_wj(
     j_id: u32,
     ndofs: u32,
     mb: &MultibodyInfo,
-    tree_factors: &[ArticulatedBodyFactor],
+    tree_factors: &[u32],
     tree_scratch: &mut [f32],
     scratch_base: usize,
     scratch_stride: usize,
@@ -48,7 +48,7 @@ pub(super) fn solve_mb_wj(
     // `batch_id` as stride / shift).
     let factors = ISlice {
         buf: tree_factors,
-        base: mb.first_link as usize,
+        base: mb.first_link as usize * ARTICULATED_FACTOR_WORDS,
         stride: il.stride,
         shift: il.shift,
     };

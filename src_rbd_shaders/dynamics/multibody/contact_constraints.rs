@@ -20,7 +20,7 @@ use khal_std::iter::StepRng;
 use khal_std::macros::{spirv, spirv_bindgen};
 use khal_std::sync::{atomic_add_u32, atomic_load_u32, workgroup_memory_barrier_with_group_sync};
 
-use super::articulated_body::{_solve_tree, ArticulatedBodyFactor, TREE_SCRATCH_WIDTH};
+use super::articulated_body::{_solve_tree, ARTICULATED_FACTOR_WORDS, TREE_SCRATCH_WIDTH};
 use crate::broad_phase::ContactPlan;
 use crate::dynamics::ConstraintSoftness;
 use crate::dynamics::body::{Velocity, WorldMassProperties};
@@ -916,8 +916,7 @@ pub fn gpu_mb_finalize_contact_constraints(
     #[spirv(workgroup_id)] workgroup_id: UVec3,
     #[spirv(local_invocation_id)] local_id: UVec3,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] multibody_info: &[MultibodyInfo],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)]
-    tree_factors: &[ArticulatedBodyFactor],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] tree_factors: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] tree_scratch: &mut [f32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)]
     contact_constraints: &mut [MultibodyContactConstraint],
@@ -952,7 +951,7 @@ pub fn gpu_mb_finalize_contact_constraints(
 
     let factors = batch_ids
         .ib(batch_id, tree_factors)
-        .offset(mb.first_link as usize);
+        .offset(mb.first_link as usize * ARTICULATED_FACTOR_WORDS);
     let count = mb.contact_constraint_count;
     let stat_slice = batch_ids
         .ib(batch_id, links_static)

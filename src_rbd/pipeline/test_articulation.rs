@@ -259,6 +259,43 @@ async fn articulation_batch_accepts_different_physical_parameters() {
 }
 
 #[futures_test::test]
+async fn articulation_batches_match_independent_steps() {
+    let backend = _backend().await;
+    let make_scene = |index: usize| {
+        let mut scene = _scene(false, true, true, true);
+        let offset = _v(0., if index % 2 == 0 { -2. } else { 0. });
+        for &handle in &scene.handles {
+            let body = &mut scene.bodies[handle];
+            body.set_translation(body.translation() + offset, false);
+            body.set_linvel(_v(index as f32 * 0.001, 0.), false);
+        }
+        scene
+    };
+    let scenes: Vec<_> = (0..65).map(make_scene).collect();
+    let (mut batched, pipeline) = _state(&backend, &scenes, -9.81, 4096);
+    for _ in 0..12 {
+        pipeline.step(&backend, &mut batched, None).unwrap();
+    }
+    let poses = _poses(&backend, &batched).await;
+    for index in [0usize, 1, 32, 64] {
+        let (mut single, pipeline) = _state(&backend, &[make_scene(index)], -9.81, 64);
+        for _ in 0..12 {
+            pipeline.step(&backend, &mut single, None).unwrap();
+        }
+        let reference = _poses(&backend, &single).await;
+        for (body, pose) in reference.iter().enumerate() {
+            assert!(
+                poses[body * 65 + index]
+                    .translation
+                    .distance(pose.translation)
+                    < 0.0001,
+                "batch {index}, body {body}: batched pose differs from independent simulation"
+            );
+        }
+    }
+}
+
+#[futures_test::test]
 async fn articulation_gpu_control_commands() {
     use crate::dynamics::{
         ArticulationJointCommand, ArticulationMotorCommand, ArticulationMotorTarget,
@@ -925,7 +962,7 @@ async fn articulation_roots_kinematics_and_dynamics() {
 #[futures_test::test]
 async fn articulation_tree_inverse_matches_dense_operator() {
     use crate::shaders::dynamics::{
-        ArticulatedBodyFactor, GpuMbAssembleMassMatrix, GpuMbComputeDynamicsPre,
+        ARTICULATED_FACTOR_WORDS, GpuMbAssembleMassMatrix, GpuMbComputeDynamicsPre,
         GpuMbFactorArticulatedBody, GpuMbSolveArticulatedBody, TREE_SCRATCH_WIDTH,
     };
     use khal::backend::Encoder;
@@ -1002,9 +1039,7 @@ async fn articulation_tree_inverse_matches_dense_operator() {
         .unwrap();
         let mut factors = Tensor::vector(
             &backend,
-            bytemuck::zeroed_vec::<ArticulatedBodyFactor>(
-                state.multibodies().links_per_batch() as usize
-            ),
+            vec![0u32; state.multibodies().links_per_batch() as usize * ARTICULATED_FACTOR_WORDS],
             storage,
         )
         .unwrap();

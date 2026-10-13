@@ -9,7 +9,7 @@ use super::{
     ws_soa::*,
 };
 use crate::dynamics::{SPATIAL_DIM, Velocity};
-use crate::utils::{BatchIndices, ISlice, linalg::VSlice};
+use crate::utils::{BatchIndices, ISlice, ISliceMut, linalg::VSlice};
 #[cfg(feature = "dim3")]
 use crate::{ANG_DIM, DIM};
 use crate::{AngVector, Pose, Vector, gcross_av};
@@ -54,6 +54,72 @@ pub struct ArticulatedBodyFactor {
     plain_inertia: Matrix,
     implicit_inertia: Matrix,
     implicit_derivative: Matrix,
+}
+
+/// Scalar fields are interleaved across batches. Integer metadata and float
+/// bit patterns share one allocation, preserving the shader binding budget.
+pub const ARTICULATED_FACTOR_WORDS: usize = 4 + 15 * S * S;
+
+fn _read_matrix(words: &ISlice<u32>, offset: usize) -> Matrix {
+    let mut matrix = [0.; S * S];
+    for i in 0..S * S {
+        matrix[i] = f32::from_bits(words[offset + i]);
+    }
+    matrix
+}
+
+fn _read_factor(words: &ISlice<u32>, node: usize) -> ArticulatedBodyFactor {
+    let offset = node * ARTICULATED_FACTOR_WORDS;
+    ArticulatedBodyFactor {
+        parent: words[offset],
+        dof: words[offset + 1],
+        ndofs: words[offset + 2],
+        _padding: 0,
+        transform: _read_matrix(words, offset + 4),
+        motion: _read_matrix(words, offset + 4 + S * S),
+        coriolis_parent: _read_matrix(words, offset + 4 + 2 * S * S),
+        coriolis_motion: _read_matrix(words, offset + 4 + 3 * S * S),
+        plain: TreeSolveFactor {
+            inverse: _read_matrix(words, offset + 4 + 4 * S * S),
+            reaction: _read_matrix(words, offset + 4 + 5 * S * S),
+            parent_velocity: _read_matrix(words, offset + 4 + 6 * S * S),
+            parent_coriolis: _read_matrix(words, offset + 4 + 7 * S * S),
+        },
+        implicit: TreeSolveFactor {
+            inverse: _read_matrix(words, offset + 4 + 8 * S * S),
+            reaction: _read_matrix(words, offset + 4 + 9 * S * S),
+            parent_velocity: _read_matrix(words, offset + 4 + 10 * S * S),
+            parent_coriolis: _read_matrix(words, offset + 4 + 11 * S * S),
+        },
+        plain_inertia: _read_matrix(words, offset + 4 + 12 * S * S),
+        implicit_inertia: _read_matrix(words, offset + 4 + 13 * S * S),
+        implicit_derivative: _read_matrix(words, offset + 4 + 14 * S * S),
+    }
+}
+
+fn _write_factor(words: &mut ISliceMut<u32>, node: usize, factor: ArticulatedBodyFactor) {
+    let offset = node * ARTICULATED_FACTOR_WORDS;
+    words[offset] = factor.parent;
+    words[offset + 1] = factor.dof;
+    words[offset + 2] = factor.ndofs;
+    words[offset + 3] = 0;
+    for i in 0..S * S {
+        words[offset + 4 + i] = factor.transform[i].to_bits();
+        words[offset + 4 + S * S + i] = factor.motion[i].to_bits();
+        words[offset + 4 + 2 * S * S + i] = factor.coriolis_parent[i].to_bits();
+        words[offset + 4 + 3 * S * S + i] = factor.coriolis_motion[i].to_bits();
+        words[offset + 4 + 4 * S * S + i] = factor.plain.inverse[i].to_bits();
+        words[offset + 4 + 5 * S * S + i] = factor.plain.reaction[i].to_bits();
+        words[offset + 4 + 6 * S * S + i] = factor.plain.parent_velocity[i].to_bits();
+        words[offset + 4 + 7 * S * S + i] = factor.plain.parent_coriolis[i].to_bits();
+        words[offset + 4 + 8 * S * S + i] = factor.implicit.inverse[i].to_bits();
+        words[offset + 4 + 9 * S * S + i] = factor.implicit.reaction[i].to_bits();
+        words[offset + 4 + 10 * S * S + i] = factor.implicit.parent_velocity[i].to_bits();
+        words[offset + 4 + 11 * S * S + i] = factor.implicit.parent_coriolis[i].to_bits();
+        words[offset + 4 + 12 * S * S + i] = factor.plain_inertia[i].to_bits();
+        words[offset + 4 + 13 * S * S + i] = factor.implicit_inertia[i].to_bits();
+        words[offset + 4 + 14 * S * S + i] = factor.implicit_derivative[i].to_bits();
+    }
 }
 
 fn _transpose(a: Matrix) -> Matrix {
@@ -226,7 +292,7 @@ fn _eliminate(
 /// Scratch is caller-owned and separate for each simultaneous right-hand side.
 pub(super) fn _solve_tree(
     mb: &MultibodyInfo,
-    factors: &ISlice<ArticulatedBodyFactor>,
+    factors: &ISlice<u32>,
     implicit: bool,
     rhs: &mut [f32],
     row: VSlice,
@@ -239,7 +305,7 @@ pub(super) fn _solve_tree(
     }
     for reverse in 0..mb.num_links {
         let k = mb.num_links - 1 - reverse;
-        let node = factors[k as usize];
+        let node = _read_factor(factors, k as usize);
         let factor = if implicit { node.implicit } else { node.plain };
         let mut force = [0.; S];
         for i in 0..S {
@@ -269,7 +335,7 @@ pub(super) fn _solve_tree(
         }
     }
     for k in 0..mb.num_links {
-        let node = factors[k as usize];
+        let node = _read_factor(factors, k as usize);
         let factor = if implicit { node.implicit } else { node.plain };
         let mut parent_v = [0.; S];
         let mut parent_c = [0.; S];
@@ -336,25 +402,24 @@ pub fn gpu_mb_factor_articulated_body(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] links: &[MultibodyLinkStatic],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] ws: &[Vec4],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] dofs: &[f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)]
-    factors: &mut [ArticulatedBodyFactor],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] factors: &mut [u32],
     #[spirv(uniform, descriptor_set = 0, binding = 5)] dt: &f32,
     #[spirv(uniform, descriptor_set = 0, binding = 6)] batches: &BatchIndices,
 ) {
     if id.x >= batches.num_batches * batches.multibodies_len {
         return;
     }
-    let batch = id.x / batches.multibodies_len;
+    let batch = id.x % batches.num_batches;
     let mb = batches
         .ib(batch, infos)
-        .read((id.x % batches.multibodies_len) as usize);
+        .read((id.x / batches.num_batches) as usize);
     let stat = batches.ib(batch, links).offset(mb.first_link as usize);
     let wa = WsAddr::new(mb.first_link as usize, batches.num_batches, batch);
     let state = batches.ib(batch, dofs).offset(mb.first_dof as usize);
     let stride = batches.dof_batch_capacity as usize;
     let mut tree = batches
         .ib_mut(batch, factors)
-        .offset(mb.first_link as usize);
+        .offset(mb.first_link as usize * ARTICULATED_FACTOR_WORDS);
     for k in 0..mb.num_links {
         let link = stat[k as usize];
         let parent_pose = if k == 0 {
@@ -444,25 +509,29 @@ pub fn gpu_mb_factor_articulated_body(
             parent_velocity: [0.; S * S],
             parent_coriolis: [0.; S * S],
         };
-        tree[k as usize] = ArticulatedBodyFactor {
-            parent: link.parent_link_id,
-            dof: link.assembly_id,
-            ndofs: link.ndofs,
-            _padding: 0,
-            transform: x,
-            motion,
-            coriolis_parent: f,
-            coriolis_motion: t,
-            plain: zero,
-            implicit: zero,
-            plain_inertia: inertia,
-            implicit_inertia,
-            implicit_derivative: derivative,
-        };
+        _write_factor(
+            &mut tree,
+            k as usize,
+            ArticulatedBodyFactor {
+                parent: link.parent_link_id,
+                dof: link.assembly_id,
+                ndofs: link.ndofs,
+                _padding: 0,
+                transform: x,
+                motion,
+                coriolis_parent: f,
+                coriolis_motion: t,
+                plain: zero,
+                implicit: zero,
+                plain_inertia: inertia,
+                implicit_inertia,
+                implicit_derivative: derivative,
+            },
+        );
     }
     for reverse in 0..mb.num_links {
         let k = mb.num_links - 1 - reverse;
-        let mut node = tree[k as usize];
+        let mut node = _read_factor(&tree.as_ref(), k as usize);
         let mut diagonal = [0.; S];
         for c in 0..node.ndofs as usize {
             let d = node.dof as usize + c;
@@ -490,9 +559,9 @@ pub fn gpu_mb_factor_articulated_body(
         );
         node.plain = plain;
         node.implicit = implicit;
-        tree[k as usize] = node;
+        _write_factor(&mut tree, k as usize, node);
         if k != 0 {
-            let mut parent = tree[node.parent as usize];
+            let mut parent = _read_factor(&tree.as_ref(), node.parent as usize);
             let xt = _transpose(node.transform);
             parent.plain_inertia = _add(
                 parent.plain_inertia,
@@ -512,7 +581,7 @@ pub fn gpu_mb_factor_articulated_body(
                 parent.implicit_derivative,
                 _multiply(xt, _multiply(ib, node.transform)),
             );
-            tree[node.parent as usize] = parent;
+            _write_factor(&mut tree, node.parent as usize, parent);
         }
     }
 }
@@ -522,7 +591,7 @@ pub fn gpu_mb_factor_articulated_body(
 pub fn gpu_mb_solve_articulated_body(
     #[spirv(global_invocation_id)] id: UVec3,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] infos: &[MultibodyInfo],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] factors: &[ArticulatedBodyFactor],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] factors: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] rhs: &mut [f32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] scratch: &mut [f32],
     #[spirv(uniform, descriptor_set = 0, binding = 4)] batches: &BatchIndices,
@@ -535,7 +604,9 @@ pub fn gpu_mb_solve_articulated_body(
     let mb = batches
         .ib(batch, infos)
         .read((id.x % batches.multibodies_len) as usize);
-    let tree = batches.ib(batch, factors).offset(mb.first_link as usize);
+    let tree = batches
+        .ib(batch, factors)
+        .offset(mb.first_link as usize * ARTICULATED_FACTOR_WORDS);
     let row = VSlice::dense(batches.mb_region(batch, mb.first_dof, mb.ndofs));
     _solve_tree(
         &mb,
@@ -557,7 +628,7 @@ pub fn gpu_mb_apply_articulated_body_forces(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] links: &[MultibodyLinkStatic],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] ws: &mut [Vec4],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] dofs: &[f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] factors: &[ArticulatedBodyFactor],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] factors: &[u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] rhs: &mut [f32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 6)] scratch: &mut [f32],
     #[spirv(uniform, descriptor_set = 0, binding = 7)] dt: &f32,
@@ -572,7 +643,9 @@ pub fn gpu_mb_apply_articulated_body_forces(
         .ib(batch, infos)
         .read((id.x % batches.multibodies_len) as usize);
     let stat = batches.ib(batch, links).offset(mb.first_link as usize);
-    let tree = batches.ib(batch, factors).offset(mb.first_link as usize);
+    let tree = batches
+        .ib(batch, factors)
+        .offset(mb.first_link as usize * ARTICULATED_FACTOR_WORDS);
     let state = batches.ib(batch, dofs).offset(mb.first_dof as usize);
     let stride = batches.dof_batch_capacity as usize;
     let base = id.x as usize * batches.mb_max_links as usize * TREE_SCRATCH_WIDTH;
@@ -584,7 +657,7 @@ pub fn gpu_mb_apply_articulated_body_forces(
     #[cfg(feature = "dim3")]
     let gravity = Vector::new(gravity.x, gravity.y, gravity.z);
     for k in 0..mb.num_links {
-        let node = tree[k as usize];
+        let node = _read_factor(&tree, k as usize);
         let properties = stat[k as usize].local_mprops;
         let joint = ws_vel(ws, wa, k, WS_JOINT_VEL);
         let r02 = ws_vec(ws, wa, k, WS_SHIFT02);
@@ -622,7 +695,7 @@ pub fn gpu_mb_apply_articulated_body_forces(
     }
     for reverse in 0..mb.num_links {
         let k = mb.num_links - 1 - reverse;
-        let node = tree[k as usize];
+        let node = _read_factor(&tree, k as usize);
         let link = stat[k as usize];
         let mut force = [0.; S];
         for i in 0..S {

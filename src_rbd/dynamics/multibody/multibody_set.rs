@@ -5,10 +5,10 @@ use crate::math::Pose;
 use crate::rapier::prelude::JointAxis;
 use crate::shaders::dynamics::SPATIAL_DIM;
 use crate::shaders::dynamics::{
-    ArticulatedBodyFactor, ConstraintSoftness, LocalMassProperties, MbDelayStateParams,
-    MbDelayTickParams, MbDofCoupling, MbImpulseJointBuilder, MbImpulseJointConstraint,
-    MultibodyContactConstraint, MultibodyInfo, MultibodyJointConstraint, MultibodyLinkStatic,
-    MultibodyLinkWorkspace, RbdSimParams, TREE_SCRATCH_WIDTH,
+    ConstraintSoftness, LocalMassProperties, MbDelayStateParams, MbDelayTickParams, MbDofCoupling,
+    MbImpulseJointBuilder, MbImpulseJointConstraint, MultibodyContactConstraint, MultibodyInfo,
+    MultibodyJointConstraint, MultibodyLinkStatic, MultibodyLinkWorkspace, RbdSimParams,
+    TREE_SCRATCH_WIDTH,
 };
 use crate::shaders::utils::BatchIndices;
 use khal::BufferUsages;
@@ -131,7 +131,7 @@ pub struct GpuMultibodySet {
     pub(super) gen_forces: Tensor<f32>,
     /// Per-link `SPATIAL_DIM × ndofs` column-major jacobians.
     pub(super) body_jacobians: Tensor<f32>,
-    pub(super) tree_factors: Tensor<ArticulatedBodyFactor>,
+    pub(super) tree_factors: Tensor<u32>,
     /// Reused across sequential solves; concurrent right-hand sides own disjoint slots.
     pub(super) tree_scratch: Tensor<f32>,
 
@@ -1229,7 +1229,7 @@ impl GpuMultibodySet {
             ),
             (
                 "tree_factors",
-                self.tree_factors.len() as usize * size_of::<ArticulatedBodyFactor>(),
+                self.tree_factors.len() as usize * size_of::<u32>(),
             ),
             (
                 "tree_scratch",

@@ -2,7 +2,7 @@
 
 use super::multibody_set::*;
 use crate::shaders::dynamics::{
-    ArticulatedBodyFactor, ConstraintSoftness, MAX_AXIS_CONSTRAINTS,
+    ARTICULATED_FACTOR_WORDS, ConstraintSoftness, MAX_AXIS_CONSTRAINTS,
     MAX_MB_CONTACT_CONSTRAINTS_PER_MB, MbDelayTickParams, MbDofCoupling, MbImpulseJointBuilder,
     MbImpulseJointConstraint, MultibodyContactConstraint, MultibodyInfo, MultibodyJointConstraint,
     MultibodyLinkStatic, MultibodyLinkWorkspace, RbdSimParams, SPATIAL_DIM, TREE_SCRATCH_WIDTH,
@@ -637,7 +637,7 @@ impl GpuMultibodySet {
             .unwrap(),
             tree_factors: Tensor::vector(
                 backend,
-                bytemuck::zeroed_vec::<ArticulatedBodyFactor>((links_cap * num_batches) as usize),
+                vec![0u32; (links_cap * num_batches) as usize * ARTICULATED_FACTOR_WORDS],
                 storage,
             )
             .unwrap(),
