@@ -644,7 +644,13 @@ async fn articulation_gpu_state_reset() {
             vels[1] = 0.3;
             vels[4] = -0.2;
         }
+        #[cfg(feature = "dim2")]
         let root = Pose::from_parts(_v(3.0, 4.0), _rotation(0.7));
+        #[cfg(feature = "dim3")]
+        let root = Pose::from_parts(
+            _v(3.0, 4.0),
+            crate::math::Rotation::from_euler(glamx::EulerRot::XYZ, 0.2, 0.3, 0.7),
+        );
         let storage = BufferUsages::STORAGE;
         let selected = Tensor::vector(&backend, &[0u32, 1, 0], storage).unwrap();
         let roots = Tensor::vector(&backend, &[root; 3], storage).unwrap();
@@ -730,6 +736,23 @@ async fn articulation_gpu_contact_reset() {
                 true,
             );
         }
+        // Exercise the regular rigid-body contact bank alongside articulation
+        // contacts. This body remains in place when the articulation resets.
+        let free = scene
+            .bodies
+            .insert(RigidBodyBuilder::dynamic().translation(_v(4.0, 0.12)));
+        scene.colliders.insert_with_parent(
+            ColliderBuilder::ball(0.15)
+                .mass(1.0)
+                .collision_groups(InteractionGroups::new(
+                    Group::GROUP_1,
+                    Group::GROUP_2,
+                    InteractionTestMode::And,
+                )),
+            free,
+            &mut scene.bodies,
+        );
+        scene.bodies[free].recompute_mass_properties_from_colliders(&scene.colliders);
     }
     let (mut state, pipeline) = _state(&backend, &scenes, -9.81, 32);
     for _ in 0..4 {
@@ -742,6 +765,12 @@ async fn articulation_gpu_contact_reset() {
             .any(|contact| contact.kind != 0 && contact.impulse > 0.0)
     );
     let infos = _read(&backend, state.multibodies().multibody_info()).await;
+    let rigid_before = _read(&backend, &state.old_constraints).await;
+    assert!(
+        rigid_before
+            .iter()
+            .any(|contact| contact.len != 0 && contact.solver_body_a % 2 == 1)
+    );
     let storage = BufferUsages::STORAGE;
     let mask = Tensor::vector(&backend, &[0u32, 1], storage).unwrap();
     let root = Pose::from_translation(_v(0.0, 3.0));
@@ -755,6 +784,16 @@ async fn articulation_gpu_contact_reset() {
         .unwrap();
     backend.submit(encoder).unwrap();
     let after = _read(&backend, state.multibodies().contact_constraints()).await;
+    let rigid_after = _read(&backend, &state.old_constraints).await;
+    for (before, after) in rigid_before.iter().zip(&rigid_after) {
+        if before.len != 0 && before.solver_body_a % 2 == 1 {
+            assert_eq!(after.len, 0);
+            assert_eq!(after.solver_body_a, u32::MAX);
+            assert_eq!(after.solver_body_b, u32::MAX);
+        } else {
+            assert_eq!(bytemuck::bytes_of(before), bytemuck::bytes_of(after));
+        }
+    }
     for batch in 0..2 {
         let mb = infos[batch];
         for index in
