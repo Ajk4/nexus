@@ -8,6 +8,7 @@ use khal_std::index::MaybeIndexUnchecked;
 use khal_std::sync::workgroup_memory_barrier_with_group_sync;
 
 use crate::utils::linalg::{MAX_MB_DOFS, VSlice};
+use crate::utils::shared::{_read as _broadcast_read, _write as _broadcast_write};
 
 /// Workgroup width for the parallelised LU kernels. Must match the
 /// `threads(N, 1, 1)` attribute and `MB_LU_LANES` on the host side.
@@ -16,6 +17,128 @@ pub(super) const LANES: u32 = 64;
 /// Side length of the workgroup-shared matrix tile. Must equal both the lane
 /// count and the maximum supported `ndofs`.
 const MAX_DOFS_U32: u32 = MAX_MB_DOFS as u32;
+
+#[cfg(all(test, feature = "cpu", not(target_arch_is_gpu)))]
+mod tests {
+    use super::*;
+    use std::cell::UnsafeCell;
+
+    #[test]
+    fn parallel_lu_solves_coupled_dofs() {
+        let n = 53;
+        let matrix = UnsafeCell::new([0.; MAX_MB_DOFS * MAX_MB_DOFS]);
+        let pivots = UnsafeCell::new([0u32; MAX_MB_DOFS]);
+        let rhs = UnsafeCell::new([0.; MAX_MB_DOFS]);
+        let partial = UnsafeCell::new([0.; LANES as usize]);
+        let pivot_row = UnsafeCell::new(0u32);
+        let inverse_pivot = UnsafeCell::new(0f32);
+        for c in 0..n {
+            for r in 0..n {
+                let value = if r == c { 2.0 + r as f32 * 0.01 } else { 0.1 };
+                unsafe {
+                    (*matrix.get())[sm_idx(r, c)] = value;
+                    (*rhs.get())[r as usize] += value;
+                }
+            }
+        }
+        let pointers = [
+            matrix.get() as usize,
+            pivots.get() as usize,
+            rhs.get() as usize,
+            partial.get() as usize,
+            pivot_row.get() as usize,
+            inverse_pivot.get() as usize,
+        ];
+        khal_std::arch::cpu::dispatch_workgroup_threads(LANES as usize, |lane| unsafe {
+            let matrix = &mut *(pointers[0] as *mut [f32; MAX_MB_DOFS * MAX_MB_DOFS]);
+            let pivots = &mut *(pointers[1] as *mut [u32; MAX_MB_DOFS]);
+            let rhs = &mut *(pointers[2] as *mut [f32; MAX_MB_DOFS]);
+            let partial = &mut *(pointers[3] as *mut [f32; LANES as usize]);
+            lu_factor_in_shared(
+                n,
+                n,
+                lane,
+                matrix,
+                pivots,
+                VSlice::dense(0),
+                &mut *(pointers[4] as *mut u32),
+                &mut *(pointers[5] as *mut f32),
+            );
+            lu_apply_pivots(n, lane, pivots, VSlice::dense(0), rhs);
+            lu_triangular_solve_in_place(n, n, lane, matrix, rhs, partial);
+        });
+        let solution = unsafe { &*rhs.get() };
+        for &value in &solution[..n as usize] {
+            assert!((value - 1.0).abs() < 1e-4, "incorrect LU solution: {value}");
+        }
+    }
+
+    #[test]
+    fn packed_lu_solves_coupled_dofs() {
+        let n = 5;
+        let matrix = UnsafeCell::new([0.; 512]);
+        let pivots = UnsafeCell::new([0u32; MAX_MB_DOFS]);
+        let rhs = UnsafeCell::new([0.; MAX_MB_DOFS]);
+        let partial = UnsafeCell::new([0.; LANES as usize]);
+        let pivot_row = UnsafeCell::new([0u32; 8]);
+        let inverse_pivot = UnsafeCell::new([0f32; 8]);
+        for c in 0..n {
+            for r in 0..n {
+                let value = if r == c { 2.0 + r as f32 * 0.01 } else { 0.1 };
+                unsafe {
+                    (*matrix.get())[sm_idx_packed::<8>(0, r, c)] = value;
+                    (*rhs.get())[r as usize] += value;
+                }
+            }
+        }
+        let pointers = [
+            matrix.get() as usize,
+            pivots.get() as usize,
+            rhs.get() as usize,
+            partial.get() as usize,
+            pivot_row.get() as usize,
+            inverse_pivot.get() as usize,
+        ];
+        khal_std::arch::cpu::dispatch_workgroup_threads(LANES as usize, |thread| unsafe {
+            let matrix = &mut *(pointers[0] as *mut [f32; 512]);
+            let pivots = &mut *(pointers[1] as *mut [u32; MAX_MB_DOFS]);
+            let rhs = &mut *(pointers[2] as *mut [f32; MAX_MB_DOFS]);
+            let partial = &mut *(pointers[3] as *mut [f32; LANES as usize]);
+            let slot = thread / 8;
+            let lane = thread % 8;
+            lu_factor_in_shared_packed::<8, 512, 8>(
+                n,
+                n,
+                slot,
+                lane,
+                slot == 0,
+                matrix,
+                pivots,
+                VSlice::dense(0),
+                &mut *(pointers[4] as *mut [u32; 8]),
+                &mut *(pointers[5] as *mut [f32; 8]),
+            );
+            lu_apply_pivots_packed::<8>(n, slot, lane, slot == 0, pivots, VSlice::dense(0), rhs);
+            lu_triangular_solve_in_place_packed::<8, 512>(
+                n,
+                n,
+                slot,
+                lane,
+                slot == 0,
+                matrix,
+                rhs,
+                partial,
+            );
+        });
+        let solution = unsafe { &*rhs.get() };
+        for &value in &solution[..n as usize] {
+            assert!(
+                (value - 1.0).abs() < 1e-4,
+                "incorrect packed LU solution: {value}"
+            );
+        }
+    }
+}
 
 /// Index helper for the shared `mat[col * MAX_MB_DOFS + row]` tile.
 #[inline]
@@ -51,11 +174,11 @@ pub(super) fn lu_factor_in_shared(
                     pivot_row = i;
                 }
             }
-            *pivot_row_shared = pivot_row;
+            _broadcast_write(pivot_row_shared, pivot_row);
             pivots_dst.write(piv.at(k), pivot_row);
         }
         workgroup_memory_barrier_with_group_sync();
-        let pivot_row = *pivot_row_shared;
+        let pivot_row = _broadcast_read(pivot_row_shared);
 
         if active && pivot_row != k && lane < n {
             let c = lane;
@@ -68,10 +191,10 @@ pub(super) fn lu_factor_in_shared(
 
         if active && lane == 0 {
             let akk = mat.read(sm_idx(k, k));
-            *inv_akk_shared = if akk != 0.0 { 1.0 / akk } else { 0.0 };
+            _broadcast_write(inv_akk_shared, if akk != 0.0 { 1.0 / akk } else { 0.0 });
         }
         workgroup_memory_barrier_with_group_sync();
-        let inv_akk = *inv_akk_shared;
+        let inv_akk = _broadcast_read(inv_akk_shared);
 
         if active {
             let r = k + 1 + lane;
@@ -112,23 +235,24 @@ pub(super) fn lu_triangular_solve_in_place(
     for i in 0..max_n {
         let active = i < n;
         let s = if active && lane < i {
-            mat.read(sm_idx(i, lane)) * x.read(lane as usize)
+            mat.read(sm_idx(i, lane)) * _broadcast_read(x.at(lane as usize))
         } else {
             0.0f32
         };
-        partial.write(lane as usize, s);
+        _broadcast_write(partial.at_mut(lane as usize), s);
         workgroup_memory_barrier_with_group_sync();
         for step in 0..6u32 {
             let stride = 1u32 << (5 - step);
             if lane < stride {
-                let v = partial.read(lane as usize) + partial.read((lane + stride) as usize);
-                partial.write(lane as usize, v);
+                let v = _broadcast_read(partial.at(lane as usize))
+                    + _broadcast_read(partial.at((lane + stride) as usize));
+                _broadcast_write(partial.at_mut(lane as usize), v);
             }
             workgroup_memory_barrier_with_group_sync();
         }
         if active && lane == 0 {
-            let cur = x.read(i as usize);
-            x.write(i as usize, cur - partial.read(0));
+            let cur = _broadcast_read(x.at(i as usize));
+            _broadcast_write(x.at_mut(i as usize), cur - _broadcast_read(partial.at(0)));
         }
         workgroup_memory_barrier_with_group_sync();
     }
@@ -139,24 +263,25 @@ pub(super) fn lu_triangular_solve_in_place(
         // every use of it behind `active`.
         let i = if active { n - 1 - step } else { 0 };
         let s = if active && lane > i && lane < n {
-            mat.read(sm_idx(i, lane)) * x.read(lane as usize)
+            mat.read(sm_idx(i, lane)) * _broadcast_read(x.at(lane as usize))
         } else {
             0.0f32
         };
-        partial.write(lane as usize, s);
+        _broadcast_write(partial.at_mut(lane as usize), s);
         workgroup_memory_barrier_with_group_sync();
         for r in 0..6u32 {
             let stride = 1u32 << (5 - r);
             if lane < stride {
-                let v = partial.read(lane as usize) + partial.read((lane + stride) as usize);
-                partial.write(lane as usize, v);
+                let v = _broadcast_read(partial.at(lane as usize))
+                    + _broadcast_read(partial.at((lane + stride) as usize));
+                _broadcast_write(partial.at_mut(lane as usize), v);
             }
             workgroup_memory_barrier_with_group_sync();
         }
         if active && lane == 0 {
             let u = mat.read(sm_idx(i, i));
-            let cur = x.read(i as usize) - partial.read(0);
-            x.write(i as usize, if u != 0.0 { cur / u } else { 0.0 });
+            let cur = _broadcast_read(x.at(i as usize)) - _broadcast_read(partial.at(0));
+            _broadcast_write(x.at_mut(i as usize), if u != 0.0 { cur / u } else { 0.0 });
         }
         workgroup_memory_barrier_with_group_sync();
     }

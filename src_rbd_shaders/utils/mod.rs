@@ -5,6 +5,7 @@ mod indices;
 pub mod linalg; // TODO: this should be moved to vortx
 pub mod prefix_sum;
 pub mod radix_sort;
+pub(crate) mod shared;
 mod slice;
 
 pub use basis::orthonormal_basis3;

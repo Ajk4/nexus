@@ -11,6 +11,7 @@ use crate::dynamics::body::Velocity;
 use crate::gdot;
 use crate::utils::BatchIndices;
 use crate::utils::linalg::MAX_MB_DOFS;
+use crate::utils::shared::WorkgroupArray;
 
 use super::types::{
     MAX_MB_CONTACT_CONSTRAINTS_PER_MB, MB_CONTACT_KIND_TANGENT, MB_JOINT_KIND_COUPLING,
@@ -65,13 +66,13 @@ pub fn gpu_mb_compute_solve_bounds(
             lane_max = count;
         }
     }
-    scratch.write(lane as usize, lane_max);
+    scratch._store(lane as usize, lane_max);
     workgroup_memory_barrier_with_group_sync();
 
     if lane == 0 {
         let mut max_count = 0u32;
         for i in 0..LANES {
-            let v = scratch.read(i as usize);
+            let v = scratch._load(i as usize);
             if v > max_count {
                 max_count = v;
             }
@@ -151,7 +152,7 @@ pub fn gpu_mb_solve_constraints(
     // only, so same-invocation ordering makes storage reads-after-writes safe
     // and no compile-time per-multibody bound is needed.
     if active && lane < ndofs {
-        dof_v.write(
+        dof_v._store(
             lane as usize,
             dof_state.read(batch_ids.mbi(batch_id, v_base + lane as usize)),
         );
@@ -189,8 +190,8 @@ pub fn gpu_mb_solve_constraints(
             // Generalized `J·v` for `J = e_{dof_id} - coupling_coeff*e_{dof2_id}`
             // (coupling rows); collapses to `v[dof_id]` for limit / motor rows
             // (their `coupling_coeff` is 0).
-            let v_d = dof_v.read(cons.dof_id as usize)
-                - cons.coupling_coeff * dof_v.read(cons.dof2_id as usize);
+            let v_d = dof_v._load(cons.dof_id as usize)
+                - cons.coupling_coeff * dof_v._load(cons.dof2_id as usize);
             let rhs_total = v_d + rhs;
             let raw_imp = cons.impulse + cons.inv_lhs * (rhs_total - cons.cfm_gain * cons.impulse);
             let mut new_imp = raw_imp;
@@ -214,7 +215,7 @@ pub fn gpu_mb_solve_constraints(
         if solve && lane < ndofs {
             let col = joint_constraint_columns
                 .read(jcol_base + (s as usize) * dofs_stride + lane as usize);
-            dof_v.write(lane as usize, dof_v.read(lane as usize) - delta * col);
+            dof_v._store(lane as usize, dof_v._load(lane as usize) - delta * col);
         }
         workgroup_memory_barrier_with_group_sync();
     }
@@ -263,10 +264,10 @@ pub fn gpu_mb_solve_constraints(
         // Multibody side of J · u, one product per lane; lane 0 sums them in
         // DOF order.
         if solve {
-            scratch.write(
+            scratch._store(
                 lane as usize,
                 if lane < ndofs {
-                    contact_jac_cols.read(jac_offset + lane as usize) * dof_v.read(lane as usize)
+                    contact_jac_cols.read(jac_offset + lane as usize) * dof_v._load(lane as usize)
                 } else {
                     0.0
                 },
@@ -277,16 +278,16 @@ pub fn gpu_mb_solve_constraints(
         let mut j_dot_v0 = 0.0f32;
         if solve && lane == 0 {
             for i in 0..ndofs {
-                j_dot_v0 += scratch.read(i as usize);
+                j_dot_v0 += scratch._load(i as usize);
             }
         }
         workgroup_memory_barrier_with_group_sync();
 
         if solve && has_pair {
-            scratch.write(
+            scratch._store(
                 lane as usize,
                 if lane < ndofs {
-                    contact_jac_cols.read(jac_offset2 + lane as usize) * dof_v.read(lane as usize)
+                    contact_jac_cols.read(jac_offset2 + lane as usize) * dof_v._load(lane as usize)
                 } else {
                     0.0
                 },
@@ -303,7 +304,7 @@ pub fn gpu_mb_solve_constraints(
             let mut j_dot_v1 = 0.0f32;
             if has_pair {
                 for i in 0..ndofs {
-                    j_dot_v1 += scratch.read(i as usize);
+                    j_dot_v1 += scratch._load(i as usize);
                 }
             }
             // Free-body side stays lane-0-local (`free_body_id` is a global
@@ -359,10 +360,10 @@ pub fn gpu_mb_solve_constraints(
             if has_pair {
                 contact_constraints.at_mut(cons_idx + 1).impulse = new1;
             }
-            deltas_shared.write(0, delta0);
+            deltas_shared._store(0, delta0);
             #[cfg(feature = "dim3")]
             {
-                deltas_shared.write(1, delta1);
+                deltas_shared._store(1, delta1);
             }
 
             if !is_self && (delta0 != 0.0 || delta1 != 0.0) {
@@ -379,19 +380,19 @@ pub fn gpu_mb_solve_constraints(
         workgroup_memory_barrier_with_group_sync();
 
         // Per-lane `dof_v.read(lane)` update.
-        let delta0 = deltas_shared.read(0);
+        let delta0 = deltas_shared._load(0);
         #[cfg(feature = "dim3")]
-        let delta1 = deltas_shared.read(1);
+        let delta1 = deltas_shared._load(1);
         #[cfg(feature = "dim2")]
         let delta1 = 0.0;
         if solve && lane < ndofs {
             if delta0 != 0.0 {
                 let col = contact_jac_cols.read(jac_offset + dofs_stride + lane as usize);
-                dof_v.write(lane as usize, dof_v.read(lane as usize) + delta0 * col);
+                dof_v._store(lane as usize, dof_v._load(lane as usize) + delta0 * col);
             }
             if has_pair && delta1 != 0.0 {
                 let col = contact_jac_cols.read(jac_offset2 + dofs_stride + lane as usize);
-                dof_v.write(lane as usize, dof_v.read(lane as usize) + delta1 * col);
+                dof_v._store(lane as usize, dof_v._load(lane as usize) + delta1 * col);
             }
         }
         workgroup_memory_barrier_with_group_sync();
@@ -402,7 +403,7 @@ pub fn gpu_mb_solve_constraints(
     if active && lane < ndofs {
         dof_state.write(
             batch_ids.mbi(batch_id, v_base + lane as usize),
-            dof_v.read(lane as usize),
+            dof_v._load(lane as usize),
         );
     }
 }
@@ -452,7 +453,7 @@ pub fn gpu_mb_solve_joints(
         + (mb.first_constraint as usize) * dofs_stride;
 
     if active && lane < ndofs {
-        dof_v.write(
+        dof_v._store(
             lane as usize,
             dof_state.read(batch_ids.mbi(batch_id, v_base + lane as usize)),
         );
@@ -489,8 +490,8 @@ pub fn gpu_mb_solve_joints(
             // Generalized `J·v` for `J = e_{dof_id} - coupling_coeff*e_{dof2_id}`
             // (coupling rows); collapses to `v[dof_id]` for limit / motor rows
             // (their `coupling_coeff` is 0).
-            let v_d = dof_v.read(cons.dof_id as usize)
-                - cons.coupling_coeff * dof_v.read(cons.dof2_id as usize);
+            let v_d = dof_v._load(cons.dof_id as usize)
+                - cons.coupling_coeff * dof_v._load(cons.dof2_id as usize);
             let rhs_total = v_d + rhs;
             let raw_imp = cons.impulse + cons.inv_lhs * (rhs_total - cons.cfm_gain * cons.impulse);
             let mut new_imp = raw_imp;
@@ -513,7 +514,7 @@ pub fn gpu_mb_solve_joints(
         if solve && lane < ndofs {
             let col = joint_constraint_columns
                 .read(jcol_base + (s as usize) * dofs_stride + lane as usize);
-            dof_v.write(lane as usize, dof_v.read(lane as usize) - delta * col);
+            dof_v._store(lane as usize, dof_v._load(lane as usize) - delta * col);
         }
         workgroup_memory_barrier_with_group_sync();
     }
@@ -521,7 +522,7 @@ pub fn gpu_mb_solve_joints(
     if active && lane < ndofs {
         dof_state.write(
             batch_ids.mbi(batch_id, v_base + lane as usize),
-            dof_v.read(lane as usize),
+            dof_v._load(lane as usize),
         );
     }
 }
@@ -664,7 +665,7 @@ pub fn gpu_mb_solve_contacts_delassus(
         * (MAXC as usize);
 
     if active && lane < ndofs {
-        dof_v.write(
+        dof_v._store(
             lane as usize,
             dof_state.read(batch_ids.mbi(batch_id, v_base + lane as usize)),
         );
@@ -705,7 +706,7 @@ pub fn gpu_mb_solve_contacts_delassus(
             let jac_off = jc_base + (s as usize) * 2 * dofs_stride;
             let mut dot = 0.0f32;
             for i in 0..ndofs {
-                dot += contact_jac_cols.read(jac_off + i as usize) * dof_v.read(i as usize);
+                dot += contact_jac_cols.read(jac_off + i as usize) * dof_v._load(i as usize);
             }
             let cons = contact_constraints.read(cons_base + s as usize);
             if cons.free_body_id != u32::MAX {
@@ -823,7 +824,7 @@ pub fn gpu_mb_solve_contacts_delassus(
                     let col = contact_jac_cols.read(
                         jc_base + (s as usize) * 2 * dofs_stride + dofs_stride + lane as usize,
                     );
-                    dof_v.write(lane as usize, dof_v.read(lane as usize) + delta0 * col);
+                    dof_v._store(lane as usize, dof_v._load(lane as usize) + delta0 * col);
                     if has_pair {
                         let col2 = contact_jac_cols.read(
                             jc_base
@@ -831,7 +832,7 @@ pub fn gpu_mb_solve_contacts_delassus(
                                 + dofs_stride
                                 + lane as usize,
                         );
-                        dof_v.write(lane as usize, dof_v.read(lane as usize) + delta1 * col2);
+                        dof_v._store(lane as usize, dof_v._load(lane as usize) + delta1 * col2);
                     }
                 }
                 #[cfg(not(feature = "web-compat"))]
@@ -847,7 +848,7 @@ pub fn gpu_mb_solve_contacts_delassus(
         if lane < ndofs {
             dof_state.write(
                 batch_ids.mbi(batch_id, v_base + lane as usize),
-                dof_v.read(lane as usize),
+                dof_v._load(lane as usize),
             );
         }
         for s in StepRng::new(lane..count, LANES) {
