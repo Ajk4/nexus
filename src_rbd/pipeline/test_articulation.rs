@@ -2,8 +2,8 @@
 //!
 //! Run `cargo test -p nexus_rbd2d --features cpu articulation_ -- --nocapture`;
 //! set `NEXUS_TEST_GPU=1` for WebGPU. Substitute `nexus_rbd3d` for the planar
-//! baseline. The ignored `articulation_benchmark` measures two warmup steps and
-//! ten timed steps, with synchronization around the timed interval.
+//! baseline. Run the ignored `articulation_benchmark` with `--release` for
+//! throughput measurements; it separates host submission and GPU pass times.
 //!
 //! The floating fixture has three unit-mass balls (radius 0.15), a revolute
 //! joint and a prismatic joint. The zero-gravity conservation probe rotates
@@ -11,22 +11,29 @@
 //! 0.001 m COM-drift and 0.001 kg*m/s linear-momentum limits. The smaller
 //! timestep is needed by the strict bound in the 3D baseline too.
 //!
-//! Allocation/throughput measurement, 2026-10-13, WebGPU default adapter:
-//! core articulation buffers use 1880 bytes/environment in 2D versus 4256 in
-//! the planar 3D baseline (56% less). This excludes contact/constraint banks,
-//! uniforms, and the rigid-body pipeline. Jacobians are 3x5 versus 6x8; the
-//! two mass-matrix sections are 5x5 versus 8x8. Planar link workspaces are
-//! 144 bytes/link, and angular Coriolis blocks have one row per DOF.
+//! Release measurements, 2026-10-13: RTX 5070, NVIDIA 580.173.02, Vulkan.
+//! Floating chains alternate revolute/prismatic motors, with contacts disabled
+//! and minimal contact-bank capacities. Warm up ten steps; report the median
+//! of three synchronized twenty-step windows. Host-call times include encoding
+//! and submission. GPU pass times are separate medians of five profiled steps;
+//! the articulation subtotal sums passes whose labels contain `mb`.
 //!
-//! | Batches | 2D ms/step | 2D env-steps/s | 3D ms/step | 3D env-steps/s |
-//! | --- | --- | --- | --- | --- |
-//! | 1 | 4.802 | 208 | 3.387 | 295 |
-//! | 8 | 3.984 | 2008 | 3.428 | 2334 |
-//! | 64 | 3.985 | 16061 | 3.402 | 18815 |
-//! | 256 | 4.089 | 62603 | 3.623 | 70653 |
+//! | Links | Batches | 2D DOFs | 2D wall ms | 3D wall ms | 2D articulation GPU ms | 3D articulation GPU ms |
+//! | --- | --- | --- | --- | --- | --- | --- |
+//! | 3 | 4096 | 5 | 3.415 | 4.168 | 1.073 | 1.844 |
+//! | 12 | 4096 | 14 | 8.540 | 13.695 | 5.620 | 10.599 |
+//! | 24 | 4096 | 26 | 30.203 | 42.101 | 27.402 | 38.821 |
+//! | 48 | 1024 | 50 | 53.641 | 64.550 | 53.016 | 63.823 |
 //!
-//! These short, small scenes are dispatch dominated; 2D used less memory but
-//! was slower in this run. Disassembling the final 2D FK, gravity, integration,
+//! Larger models become GPU-bound: the 24-link case spends 27.4 ms in
+//! articulation passes, versus about 0.64 ms in host calls. Dense Jacobian and
+//! mass-matrix assembly scales strongly with the number of links and DOFs.
+//! The three-link case peaks near 1.2M end-to-end model-steps/s; the 24-link
+//! case near 136k. Core buffers use 1880/4256 bytes per three-link 2D/3D model,
+//! or 30272/58772 bytes per 24-link model. These counts exclude constraint banks,
+//! uniforms, and rigid-body buffers. Planar link workspaces are 144 bytes/link.
+//!
+//! Disassembling the final 2D FK, gravity, integration,
 //! contact, and external-joint SPIR-V modules showed only scalar, Vec2, and
 //! aligned Vec4 floating-point types, with no Vec3 or matrix types. UVec3
 //! remains necessary for GPU invocation IDs.
@@ -155,7 +162,12 @@ fn _scene(fixed: bool, motors: bool, ground: bool, external: bool) -> Scene {
     s
 }
 
-fn _state(backend: &GpuBackend, scenes: &[Scene], gravity: f32) -> (RbdState, RbdPipeline) {
+fn _state(
+    backend: &GpuBackend,
+    scenes: &[Scene],
+    gravity: f32,
+    contact_capacity: u32,
+) -> (RbdState, RbdPipeline) {
     let params = RbdSimParams {
         dt: 1.0 / 600.0,
         ..RbdSimParams::tgs_soft()
@@ -169,8 +181,8 @@ fn _state(backend: &GpuBackend, scenes: &[Scene], gravity: f32) -> (RbdState, Rb
         &refs,
         RbdCapacities {
             batches: scenes.len() as u32,
-            collisions_capacity: 32,
-            mb_contact_constraints_capacity: 32,
+            collisions_capacity: contact_capacity,
+            mb_contact_constraints_capacity: contact_capacity,
             collisions_resize_policy: RbdResizePolicy::Fixed,
             solver_colors_resize_policy: RbdResizePolicy::Fixed,
             ..Default::default()
@@ -193,7 +205,7 @@ async fn articulation_roots_kinematics_and_dynamics() {
     let backend = _backend().await;
     for fixed in [false, true] {
         let scenes = [_scene(fixed, false, false, false)];
-        let (mut state, pipeline) = _state(&backend, &scenes, -9.81);
+        let (mut state, pipeline) = _state(&backend, &scenes, -9.81, 32);
         pipeline.step(&backend, &mut state, None).unwrap();
         let poses = _poses(&backend, &state).await;
         for i in 0..3 {
@@ -244,7 +256,7 @@ async fn articulation_limits_recover_out_of_range_joints() {
         .unwrap()
         .0
         .apply_displacements(&displacement);
-    let (mut state, pipeline) = _state(&backend, &scenes, 0.0);
+    let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 32);
     let before = state
         .multibodies()
         .read_dof_coords(&backend, 0)
@@ -268,7 +280,7 @@ async fn articulation_motors_limits_and_momentum() {
     let backend = _backend().await;
     for fixed in [false, true] {
         let scenes = [_scene(fixed, true, false, false)];
-        let (mut state, pipeline) = _state(&backend, &scenes, 0.0);
+        let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 32);
         let initial = _poses(&backend, &state).await;
         let initial_com =
             (initial[0].translation + initial[1].translation + initial[2].translation) / 3.0;
@@ -347,7 +359,7 @@ async fn articulation_contacts_and_external_joints() {
     let backend = _backend().await;
     for external in [false, true] {
         let scenes = [_scene(external, false, !external, external)];
-        let (mut state, pipeline) = _state(&backend, &scenes, -9.81);
+        let (mut state, pipeline) = _state(&backend, &scenes, -9.81, 32);
         for _ in 0..1200 {
             pipeline.step(&backend, &mut state, None).unwrap();
         }
@@ -399,7 +411,7 @@ async fn articulation_planar_rotation_and_wrench() {
     let mut scenes = [_scene(false, false, false, false)];
     let root = scenes[0].handles[0];
     scenes[0].bodies[root].set_rotation(glamx::Rot2::from_angle(0.4), true);
-    let (mut state, pipeline) = _state(&backend, &scenes, 0.0);
+    let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 32);
     pipeline.step(&backend, &mut state, None).unwrap();
     let poses = _poses(&backend, &state).await;
     for p in poses.iter().take(3) {
@@ -422,21 +434,72 @@ async fn articulation_planar_rotation_and_wrench() {
 #[ignore = "short throughput and allocation probe"]
 async fn articulation_benchmark() {
     let backend = _backend().await;
-    for batches in [1, 8, 64, 256] {
-        let scenes: Vec<_> = (0..batches)
-            .map(|_| _scene(false, true, false, false))
-            .collect();
-        let (mut state, pipeline) = _state(&backend, &scenes, 0.0);
-        for _ in 0..2 {
-            pipeline.step(&backend, &mut state, None).unwrap();
-        }
-        backend.synchronize().unwrap();
-        let start = std::time::Instant::now();
+    if let GpuBackend::WebGpu(webgpu) = &backend {
+        eprintln!("adapter={:?}", webgpu.device().adapter_info());
+    }
+    for (links, batches) in [
+        (3, 1),
+        (3, 256),
+        (3, 1024),
+        (3, 4096),
+        (3, 16384),
+        (12, 4096),
+        (24, 1),
+        (24, 64),
+        (24, 256),
+        (24, 1024),
+        (24, 4096),
+        (48, 1024),
+    ] {
+        let scenes: Vec<_> = (0..batches).map(|_| _benchmark_chain(links)).collect();
+        // Contact-free benchmark: keep the unused contact banks minimal.
+        let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 1);
         for _ in 0..10 {
             pipeline.step(&backend, &mut state, None).unwrap();
         }
         backend.synchronize().unwrap();
-        let seconds = start.elapsed().as_secs_f64();
+        let mut elapsed = Vec::new();
+        let mut host = Vec::new();
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let mut host_seconds = 0.0;
+            for _ in 0..20 {
+                let host_start = std::time::Instant::now();
+                pipeline.step(&backend, &mut state, None).unwrap();
+                host_seconds += host_start.elapsed().as_secs_f64();
+            }
+            backend.synchronize().unwrap();
+            elapsed.push(start.elapsed().as_secs_f64() / 20.0);
+            host.push(host_seconds / 20.0);
+        }
+        elapsed.sort_by(f64::total_cmp);
+        host.sort_by(f64::total_cmp);
+        let seconds = elapsed[1];
+        let mut timestamps = khal::backend::GpuTimestamps::new(&backend, 256);
+        assert!(
+            timestamps.is_enabled(),
+            "benchmark requires pass timestamps"
+        );
+        let mut gpu_ms = Vec::new();
+        let mut articulation_ms = Vec::new();
+        for _ in 0..5 {
+            timestamps.reset();
+            pipeline
+                .step(&backend, &mut state, Some(&mut timestamps))
+                .unwrap();
+            backend.synchronize().unwrap();
+            let passes = timestamps.read(&backend).await.unwrap();
+            gpu_ms.push(passes.iter().map(|p| p.duration_ms).sum::<f64>());
+            articulation_ms.push(
+                passes
+                    .iter()
+                    .filter(|p| p.label.contains("mb"))
+                    .map(|p| p.duration_ms)
+                    .sum::<f64>(),
+            );
+        }
+        gpu_ms.sort_by(f64::total_cmp);
+        articulation_ms.sort_by(f64::total_cmp);
         let allocations = state.multibodies()._core_allocation_sizes();
         let bytes: usize = allocations.iter().map(|(_, bytes)| bytes).sum();
         let infos: Vec<crate::shaders::dynamics::MultibodyInfo> = backend
@@ -447,13 +510,69 @@ async fn articulation_benchmark() {
         let poses = _poses(&backend, &state).await;
         assert!(poses.iter().all(|p| p.translation.is_finite()));
         eprintln!(
-            "dim={} batches={batches} dofs={ndofs} jacobian={}x{ndofs} core_bytes={bytes} allocations={allocations:?} ms_per_step={:.3} env_steps_per_second={:.0}",
+            "dim={} links={links} batches={batches} dofs={ndofs} core_bytes_per_env={} wall_ms={:.3} host_call_ms={:.3} all_gpu_ms={:.3} articulation_gpu_ms={:.3} env_steps_per_second={:.0}",
             crate::math::DIM,
-            crate::shaders::dynamics::SPATIAL_DIM,
-            seconds * 100.0,
-            batches as f64 * 10.0 / seconds
+            bytes / batches,
+            seconds * 1000.0,
+            host[1] * 1000.0,
+            gpu_ms[2],
+            articulation_ms[2],
+            batches as f64 / seconds
         );
     }
+}
+
+fn _benchmark_chain(links: usize) -> Scene {
+    let mut s = Scene {
+        bodies: RigidBodySet::new(),
+        colliders: ColliderSet::new(),
+        mb: MultibodyJointSet::new(),
+        joints: ImpulseJointSet::new(),
+        handles: Vec::new(),
+    };
+    for i in 0..links {
+        let h = s
+            .bodies
+            .insert(RigidBodyBuilder::dynamic().translation(_v(i as f32, 2.0)));
+        s.colliders.insert_with_parent(
+            ColliderBuilder::ball(0.15)
+                .mass(1.0)
+                .collision_groups(InteractionGroups::new(
+                    Group::NONE,
+                    Group::NONE,
+                    InteractionTestMode::And,
+                )),
+            h,
+            &mut s.bodies,
+        );
+        if i > 0 {
+            let joint: GenericJoint = if i % 2 == 1 {
+                _hinge()
+                    .local_anchor1(_v(0.5, 0.0))
+                    .local_anchor2(_v(-0.5, 0.0))
+                    .limits([-0.5, 0.5])
+                    .motor_position(0.15, 40.0, 5.0)
+                    .motor_max_force(10.0)
+                    .build()
+                    .into()
+            } else {
+                PrismaticJointBuilder::new(Vector::X)
+                    .local_anchor1(_v(0.5, 0.0))
+                    .local_anchor2(_v(-0.5, 0.0))
+                    .limits([-0.2, 0.2])
+                    .motor_position(0.1, 40.0, 5.0)
+                    .motor_max_force(10.0)
+                    .build()
+                    .into()
+            };
+            s.mb.insert(s.handles[i - 1], h, joint, true).unwrap();
+        }
+        s.handles.push(h);
+    }
+    for (_, b) in s.bodies.iter_mut() {
+        b.recompute_mass_properties_from_colliders(&s.colliders);
+    }
+    s
 }
 
 fn _ground() -> ColliderBuilder {
@@ -482,7 +601,7 @@ async fn _velocities(backend: &GpuBackend, state: &RbdState) -> Vec<Velocity> {
 async fn articulation_selective_reset() {
     let backend = _backend().await;
     let template_scene = [_scene(false, true, false, false)];
-    let (mut template, template_pipeline) = _state(&backend, &template_scene, 0.0);
+    let (mut template, template_pipeline) = _state(&backend, &template_scene, 0.0, 32);
     for _ in 0..30 {
         template_pipeline
             .step(&backend, &mut template, None)
@@ -500,7 +619,7 @@ async fn articulation_selective_reset() {
         _scene(false, true, false, false),
         _scene(false, true, false, false),
     ];
-    let (mut state, pipeline) = _state(&backend, &scenes, 0.0);
+    let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 32);
     for _ in 0..10 {
         pipeline.step(&backend, &mut state, None).unwrap();
     }
@@ -588,7 +707,7 @@ async fn articulation_rapier_comparison() {
     let backend = _backend().await;
     for fixed in [false, true] {
         let mut scenes = [_scene(fixed, false, false, false)];
-        let (mut state, pipeline) = _state(&backend, &scenes, -9.81);
+        let (mut state, pipeline) = _state(&backend, &scenes, -9.81, 32);
         let mut rapier = PhysicsPipeline::new();
         let params = IntegrationParameters {
             dt: 1.0 / 600.0,
