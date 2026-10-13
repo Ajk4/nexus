@@ -1,4 +1,35 @@
-//! Native articulation probes. Set NEXUS_TEST_GPU=1 to run on WebGPU.
+//! Native articulation probes, with the same planar fixture run through 3D.
+//!
+//! Run `cargo test -p nexus_rbd2d --features cpu articulation_ -- --nocapture`;
+//! set `NEXUS_TEST_GPU=1` for WebGPU. Substitute `nexus_rbd3d` for the planar
+//! baseline. The ignored `articulation_benchmark` measures two warmup steps and
+//! ten timed steps, with synchronization around the timed interval.
+//!
+//! The floating fixture has three unit-mass balls (radius 0.15), a revolute
+//! joint and a prismatic joint. The zero-gravity conservation probe rotates
+//! and telescopes simultaneously for 240 steps at dt=1/600, retaining the
+//! 0.001 m COM-drift and 0.001 kg*m/s linear-momentum limits. The smaller
+//! timestep is needed by the strict bound in the 3D baseline too.
+//!
+//! Allocation/throughput measurement, 2026-10-13, WebGPU default adapter:
+//! core articulation buffers use 1880 bytes/environment in 2D versus 4256 in
+//! the planar 3D baseline (56% less). This excludes contact/constraint banks,
+//! uniforms, and the rigid-body pipeline. Jacobians are 3x5 versus 6x8; the
+//! two mass-matrix sections are 5x5 versus 8x8. Planar link workspaces are
+//! 144 bytes/link, and angular Coriolis blocks have one row per DOF.
+//!
+//! | Batches | 2D ms/step | 2D env-steps/s | 3D ms/step | 3D env-steps/s |
+//! | --- | --- | --- | --- | --- |
+//! | 1 | 4.802 | 208 | 3.387 | 295 |
+//! | 8 | 3.984 | 2008 | 3.428 | 2334 |
+//! | 64 | 3.985 | 16061 | 3.402 | 18815 |
+//! | 256 | 4.089 | 62603 | 3.623 | 70653 |
+//!
+//! These short, small scenes are dispatch dominated; 2D used less memory but
+//! was slower in this run. Disassembling the final 2D FK, gravity, integration,
+//! contact, and external-joint SPIR-V modules showed only scalar, Vec2, and
+//! aligned Vec4 floating-point types, with no Vec3 or matrix types. UVec3
+//! remains necessary for GPU invocation IDs.
 use crate::math::{Pose, Vector};
 
 #[cfg(feature = "dim2")]
@@ -196,6 +227,40 @@ async fn articulation_roots_kinematics_and_dynamics() {
             );
         }
     }
+}
+
+#[futures_test::test]
+async fn articulation_limits_recover_out_of_range_joints() {
+    let backend = _backend().await;
+    let mut scenes = [_scene(true, false, false, false)];
+    let mut displacement = vec![0.0; crate::shaders::dynamics::SPATIAL_DIM + 2];
+    let n = displacement.len();
+    displacement[n - 2] = 0.7;
+    displacement[n - 1] = 0.3;
+    let handle = scenes[0].mb.iter().next().unwrap().0;
+    scenes[0]
+        .mb
+        .get_mut(handle)
+        .unwrap()
+        .0
+        .apply_displacements(&displacement);
+    let (mut state, pipeline) = _state(&backend, &scenes, 0.0);
+    let before = state
+        .multibodies()
+        .read_dof_coords(&backend, 0)
+        .await
+        .unwrap();
+    assert!(before[0] > 0.5 && before[1] > 0.2);
+    for _ in 0..90 {
+        pipeline.step(&backend, &mut state, None).unwrap();
+    }
+    let after = state
+        .multibodies()
+        .read_dof_coords(&backend, 0)
+        .await
+        .unwrap();
+    assert!(after[0].abs() < 0.52, "hinge limit recovery: {}", after[0]);
+    assert!(after[1].abs() < 0.22, "slider limit recovery: {}", after[1]);
 }
 
 #[futures_test::test]
@@ -425,6 +490,11 @@ async fn articulation_selective_reset() {
     }
     let snapshot = template.snapshot(&backend).await;
     let template_poses = _poses(&backend, &template).await;
+    let template_coords = template
+        .multibodies()
+        .read_dof_coords(&backend, 0)
+        .await
+        .unwrap();
     let scenes = [
         _scene(false, true, false, false),
         _scene(false, true, false, false),
@@ -438,6 +508,17 @@ async fn articulation_selective_reset() {
     let offset = _v(4.0, -3.0);
     state.reset_env_from_snapshot_offset(&backend, 1, &snapshot, offset);
     let after = _poses(&backend, &state).await;
+    let mut expected_coords = template_coords.clone();
+    expected_coords[0] += offset.x;
+    expected_coords[1] += offset.y;
+    assert_eq!(
+        state
+            .multibodies()
+            .read_dof_coords(&backend, 1)
+            .await
+            .unwrap(),
+        expected_coords
+    );
     for body in 0..3 {
         assert_eq!(before[body * 3], after[body * 3]);
         assert_eq!(before[body * 3 + 2], after[body * 3 + 2]);
@@ -456,6 +537,19 @@ async fn articulation_selective_reset() {
         &vec![0.0; 2 * state.multibodies().dofs_per_batch() as usize],
     );
     let reset = _poses(&backend, &state).await;
+    for (batch, translation) in [(0, offset), (2, -offset)] {
+        let mut expected_coords = template_coords.clone();
+        expected_coords[0] += translation.x;
+        expected_coords[1] += translation.y;
+        assert_eq!(
+            state
+                .multibodies()
+                .read_dof_coords(&backend, batch)
+                .await
+                .unwrap(),
+            expected_coords
+        );
+    }
     for body in 0..3 {
         assert_eq!(reset[body * 3 + 1], after[body * 3 + 1]);
         assert!(
