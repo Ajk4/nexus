@@ -15,7 +15,6 @@ use super::articulated_body::{_solve_tree, ARTICULATED_FACTOR_WORDS, TREE_SCRATC
 use crate::dynamics::ConstraintSoftness;
 use crate::dynamics::joint::SPATIAL_DIM;
 use crate::utils::BatchIndices;
-use crate::utils::linalg::VSlice;
 use crate::{DIM, MAX_FLT};
 
 use super::types::{
@@ -601,7 +600,6 @@ pub fn gpu_mb_finalize_joint_constraints(
     }
 
     let cons_base = batch_ids.mb_joint_constraints_start(batch_id) + mb.first_constraint as usize;
-    let dofs_stride = batch_ids.dof_batch_capacity as usize;
     let factors = batch_ids
         .ib(batch_id, tree_factors)
         .offset(mb.first_link as usize * ARTICULATED_FACTOR_WORDS);
@@ -611,7 +609,7 @@ pub fn gpu_mb_finalize_joint_constraints(
         return;
     }
     let local_slot = mb.first_constraint as usize + s as usize;
-    let column = VSlice::interleaved(local_slot * dofs_stride, batch_ids.num_batches, batch_id);
+    let column = batch_ids.mb_joint_constraint_column(batch_id, local_slot as u32);
     for d in 0..ndofs {
         let value = if d == cons.dof_id { 1. } else { 0. }
             - if d == cons.dof2_id {

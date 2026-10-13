@@ -167,8 +167,16 @@ impl BatchIndices {
     }
 
     #[inline]
-    pub fn mb_joint_constraint_columns_start(&self, batch_id: u32) -> usize {
-        batch_id as usize * self.mb_joint_constraint_columns_batch_capacity as usize
+    pub fn mb_joint_constraint_column(
+        &self,
+        batch_id: u32,
+        constraint: u32,
+    ) -> super::linalg::VSlice {
+        super::linalg::VSlice::interleaved(
+            constraint as usize * self.dof_batch_capacity as usize,
+            self.num_batches,
+            batch_id,
+        )
     }
 
     #[inline]

@@ -933,7 +933,7 @@ impl GpuMultibodySet {
         self.joint_constraints_per_batch
     }
 
-    /// Per-batch stride of the joint-constraint `M⁻¹` column buffer.
+    /// Scalar column entries per batch, interleaved across batches.
     pub fn joint_constraint_columns_per_batch(&self) -> u32 {
         self.joint_constraint_columns_per_batch
     }
