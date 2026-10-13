@@ -304,7 +304,8 @@ impl GpuMultibodySet {
         }
 
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
-        self.mb_imp_joint_builders = Tensor::vector(backend, &all_builders, storage).unwrap();
+        self.mb_imp_joint_builders =
+            Tensor::vector(backend, &all_builders, storage | BufferUsages::COPY_SRC).unwrap();
         self.mb_imp_joint_constraints = Tensor::vector(
             backend,
             vec![MbImpulseJointConstraint::default(); (cons_cap * self.num_batches) as usize],

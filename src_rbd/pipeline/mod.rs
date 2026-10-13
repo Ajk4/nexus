@@ -4,6 +4,7 @@
 //! simulation step on the GPU. The pipeline manages collision detection, contact generation,
 //! constraint solving, and integration.
 
+mod articulation_commands;
 #[cfg(all(test, feature = "dim3"))]
 mod bench_narrow_phase;
 mod insertion_removal;

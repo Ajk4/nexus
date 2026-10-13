@@ -6,7 +6,9 @@ pub use coloring::{ColorBucketsArgs, ColoringArgs, GpuColoring};
 pub use joint::{GpuImpulseJointSet, GpuJointSolver, JointSolverArgs, convert_joint_motor};
 pub use mprops_update::{GpuMpropsUpdate, GpuSyncColliderPosesShader};
 pub use multibody::{
-    GpuMultibodySet, GpuMultibodySnapshot, GpuMultibodySolver, MultibodySolverArgs,
+    ArticulationJointCommand, ArticulationMotorCommand, ArticulationMotorTarget,
+    GpuArticulationCommands, GpuMultibodySet, GpuMultibodySnapshot, GpuMultibodySolver,
+    MultibodySolverArgs,
 };
 pub use prep_render::{RbdInstanceDesc, WgRbdPrepRender};
 pub use solver::{GpuSolver, SolverArgs};

@@ -201,6 +201,83 @@ async fn _poses(backend: &GpuBackend, state: &RbdState) -> Vec<Pose> {
 }
 
 #[futures_test::test]
+async fn articulation_gpu_control_commands() {
+    use crate::dynamics::{
+        ArticulationJointCommand, ArticulationMotorCommand, ArticulationMotorTarget,
+        GpuArticulationCommands,
+    };
+    use khal::BufferUsages;
+    use vortx::tensor::Tensor;
+    let backend = _backend().await;
+    let scenes = [
+        _scene(false, true, false, true),
+        _scene(false, true, false, true),
+    ];
+    let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 32);
+    let kernels = GpuArticulationCommands::new(&backend).unwrap();
+    let mut motor = ArticulationMotorCommand {
+        batch: 1,
+        link: 1,
+        axes: 1 << ANG_AXIS,
+        ..Default::default()
+    };
+    motor.targets[ANG_AXIS] = ArticulationMotorTarget {
+        position: -0.25,
+        velocity: -0.4,
+    };
+    let motors = Tensor::vector(&backend, &[motor], BufferUsages::STORAGE).unwrap();
+    let old = _read(&backend, state.multibodies().impulse_joint_builders()).await;
+    let joints = Tensor::vector(
+        &backend,
+        &[ArticulationJointCommand {
+            batch: 1,
+            joint: old[1].joint_id,
+            locked_axes: 0,
+            frame_a: Pose::from_translation(_v(0.1, 0.2)),
+            frame_b: Pose::from_translation(_v(-0.1, -0.2)),
+            _padding: 0,
+        }],
+        BufferUsages::STORAGE,
+    )
+    .unwrap();
+    let mut encoder = backend.begin_encoding();
+    state
+        .encode_articulation_motor_targets(&mut encoder, &kernels, &motors)
+        .unwrap();
+    state
+        .encode_articulation_impulse_joints(&mut encoder, &kernels, &joints)
+        .unwrap();
+    backend.submit(encoder).unwrap();
+    let links = _read(&backend, state.multibodies().links_static()).await;
+    assert_eq!(links[2].data.motors[ANG_AXIS].target_pos, 0.35);
+    assert_eq!(links[3].data.motors[ANG_AXIS].target_pos, -0.25);
+    assert_eq!(links[3].data.motors[ANG_AXIS].target_vel, -0.4);
+    let updated = _read(&backend, state.multibodies().impulse_joint_builders()).await;
+    assert_eq!(updated[0].joint.local_frame_a, old[0].joint.local_frame_a);
+    assert_eq!(updated[0].joint.locked_axes, old[0].joint.locked_axes);
+    assert_eq!(updated[1].joint.local_frame_a.translation, _v(0.1, 0.2));
+    assert_eq!(updated[1].joint.local_frame_b.translation, _v(-0.1, -0.2));
+    assert_eq!(updated[1].joint.locked_axes, 0);
+    for _ in 0..12 {
+        pipeline.step(&backend, &mut state, None).unwrap();
+    }
+    let poses = _poses(&backend, &state).await;
+    assert!(poses.iter().all(|pose| pose.translation.is_finite()));
+}
+
+async fn _read<T: bytemuck::Pod + Send + Sync>(
+    backend: &GpuBackend,
+    tensor: &vortx::tensor::Tensor<T>,
+) -> Vec<T> {
+    let mut values = bytemuck::zeroed_vec(tensor.len() as usize);
+    backend
+        .slow_read_buffer(tensor.buffer(), &mut values)
+        .await
+        .unwrap();
+    values
+}
+
+#[futures_test::test]
 async fn articulation_roots_kinematics_and_dynamics() {
     let backend = _backend().await;
     for fixed in [false, true] {
