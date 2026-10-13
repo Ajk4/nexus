@@ -33,7 +33,9 @@ pub struct ArticulationMotorCommand {
 
 /// Update an existing external joint, preserving topology and solver coloring.
 /// `joint` is the source impulse-joint id (`MbImpulseJointBuilder::joint_id`).
-/// Frames are in solver COM space, as in the resident builder descriptors.
+/// Frame conventions match the resident builders: body-origin local space
+/// for an articulation link, COM-local space for a free body, and world space
+/// for a fixed side (whose body transform is already folded into the frame).
 #[derive(Clone, Copy, Default)]
 #[cfg_attr(not(target_arch_is_gpu), derive(bytemuck::Pod, bytemuck::Zeroable))]
 #[repr(C)]

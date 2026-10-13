@@ -288,6 +288,315 @@ fn _rotation(angle: f32) -> crate::math::Rotation {
     }
 }
 
+fn _branched_scene() -> Scene {
+    let mut scene = Scene {
+        bodies: RigidBodySet::new(),
+        colliders: ColliderSet::new(),
+        mb: MultibodyJointSet::new(),
+        joints: ImpulseJointSet::new(),
+        handles: Vec::new(),
+    };
+    for body in 0..51 {
+        let position = if body == 0 {
+            _v(0.0, 3.0)
+        } else {
+            let branch = (body - 1) / 10;
+            let depth = (body - 1) % 10;
+            _v((depth + 1) as f32 * 0.4, 3.0 + (branch as f32 - 2.0) * 0.6)
+        };
+        let handle = scene
+            .bodies
+            .insert(RigidBodyBuilder::dynamic().translation(position));
+        scene.colliders.insert_with_parent(
+            ColliderBuilder::ball(0.07)
+                .mass(1.0)
+                .collision_groups(InteractionGroups::none()),
+            handle,
+            &mut scene.bodies,
+        );
+        scene.handles.push(handle);
+        if body != 0 {
+            let depth = (body - 1) % 10;
+            let parent = if depth == 0 { 0 } else { body - 1 };
+            let offset = if depth == 0 {
+                ((body - 1) / 10) as f32 * 0.6 - 1.2
+            } else {
+                0.0
+            };
+            let joint: GenericJoint = if depth % 2 == 0 {
+                _hinge()
+                    .local_anchor1(_v(0.2, offset))
+                    .local_anchor2(_v(-0.2, 0.0))
+                    .limits([-0.5, 0.5])
+                    .motor_position(0.0, 20.0, 4.0)
+                    .motor_max_force(10.0)
+                    .into()
+            } else {
+                PrismaticJointBuilder::new(Vector::X)
+                    .local_anchor1(_v(0.2, offset))
+                    .local_anchor2(_v(-0.2, 0.0))
+                    .limits([-0.2, 0.2])
+                    .motor_position(0.0, 20.0, 4.0)
+                    .motor_max_force(10.0)
+                    .into()
+            };
+            scene
+                .mb
+                .insert(scene.handles[parent], handle, joint, true)
+                .unwrap();
+        }
+    }
+    for branch in 0..5 {
+        let tip = scene.handles[10 + branch * 10];
+        let anchor = scene.bodies.insert(
+            RigidBodyBuilder::fixed().translation(scene.bodies[tip].position().translation),
+        );
+        scene.colliders.insert_with_parent(
+            ColliderBuilder::ball(0.02).collision_groups(InteractionGroups::none()),
+            anchor,
+            &mut scene.bodies,
+        );
+        scene.joints.insert(
+            tip,
+            anchor,
+            GenericJointBuilder::new(JointAxesMask::empty()),
+            true,
+        );
+    }
+    for (_, body) in scene.bodies.iter_mut() {
+        body.recompute_mass_properties_from_colliders(&scene.colliders);
+    }
+    scene
+}
+
+/// Independent planar branch kinematics, evaluated twice for a velocity
+/// finite difference. Inputs are indexed by physical body, not GPU link order.
+fn _branched_poses(root: Pose, coordinates: &[f32]) -> Vec<Pose> {
+    let mut poses = vec![root; 51];
+    for branch in 0..5 {
+        let mut parent = root;
+        for depth in 0..10 {
+            let body = 1 + branch * 10 + depth;
+            let offset = if depth == 0 {
+                branch as f32 * 0.6 - 1.2
+            } else {
+                0.0
+            };
+            let joint = if depth % 2 == 0 {
+                Pose::from_parts(Vector::ZERO, _rotation(coordinates[body]))
+            } else {
+                Pose::from_translation(_v(coordinates[body], 0.0))
+            };
+            parent = parent
+                * Pose::from_translation(_v(0.2, offset))
+                * joint
+                * Pose::from_translation(_v(0.2, 0.0));
+            poses[body] = parent;
+        }
+    }
+    poses
+}
+
+#[futures_test::test]
+async fn articulation_gpu_branched_control_and_reset() {
+    use crate::dynamics::{
+        ArticulationJointCommand, ArticulationMotorCommand, ArticulationMotorTarget,
+        GpuArticulationCommands,
+    };
+    use crate::shaders::dynamics::SPATIAL_DIM;
+    use khal::BufferUsages;
+    use vortx::tensor::Tensor;
+    let backend = _backend().await;
+    let kernels = GpuArticulationCommands::new(&backend).unwrap();
+    let scenes = [_branched_scene(), _branched_scene(), _branched_scene()];
+    let (mut state, pipeline) = _state(&backend, &scenes, 0.0, 32);
+    assert_eq!(state.multibodies().links_per_batch(), 51);
+    assert_eq!(
+        state.multibodies().dofs_per_batch(),
+        SPATIAL_DIM as u32 + 50
+    );
+    for _ in 0..3 {
+        pipeline.step(&backend, &mut state, None).unwrap();
+    }
+    let before = _poses(&backend, &state).await;
+    let before_vels = _read(&backend, state.body_velocities()).await;
+    let before_dofs = _read(&backend, state.multibodies().dof_state()).await;
+    let links = _read(&backend, state.multibodies().links_static()).await;
+    let builders = _read(&backend, state.multibodies().impulse_joint_builders()).await;
+    let dpb = state.multibodies().dofs_per_batch() as usize;
+    let mut coordinates = vec![0.0; dpb * 3];
+    let mut velocities = vec![0.0; dpb * 3];
+    velocities[1] = 0.2;
+    velocities[4] = -0.1;
+    velocities[(SPATIAL_DIM - 1) * 3 + 1] = 0.07;
+    let mut body_q = vec![0.0; 51];
+    let mut body_qd = vec![0.0; 51];
+    let mut motors = Vec::new();
+    for link in 1..51 {
+        let descriptor = links[link * 3 + 1];
+        let body = descriptor.rb_id as usize;
+        let revolute = (body - 1) % 10 % 2 == 0;
+        let q = if revolute { 0.03 } else { 0.01 };
+        let qd = if revolute { 0.08 } else { 0.02 };
+        coordinates[descriptor.assembly_id as usize * 3 + 1] = q;
+        velocities[descriptor.assembly_id as usize * 3 + 1] = qd;
+        body_q[body] = q;
+        body_qd[body] = qd;
+        let axis =
+            (!descriptor.data.locked_axes & ((1 << SPATIAL_DIM) - 1)).trailing_zeros() as usize;
+        let mut command = ArticulationMotorCommand {
+            batch: 1,
+            link: link as u32,
+            axes: 1 << axis,
+            ..Default::default()
+        };
+        command.targets[axis] = ArticulationMotorTarget {
+            position: q + 0.04,
+            velocity: qd + 0.1,
+        };
+        motors.push(command);
+    }
+    let root = Pose::from_parts(_v(0.0, 3.0), _rotation(0.2));
+    let expected = _branched_poses(root, &body_q);
+    let epsilon = 0.001;
+    let next_q: Vec<_> = body_q
+        .iter()
+        .zip(&body_qd)
+        .map(|(q, qd)| q + qd * epsilon)
+        .collect();
+    let next = _branched_poses(
+        Pose::from_parts(
+            root.translation + _v(0.2, -0.1) * epsilon,
+            _rotation(0.2 + 0.07 * epsilon),
+        ),
+        &next_q,
+    );
+    let mut joint_commands = Vec::new();
+    for builder in builders.iter().skip(1).step_by(3) {
+        let body = links[builder.side_a_link as usize * 3 + 1].rb_id as usize;
+        // The anchor remains fixed. Move its local frame to meet the reset
+        // tip pose, then lock translation while every branch motor is active.
+        let frame_b = expected[body];
+        joint_commands.push(ArticulationJointCommand {
+            batch: 1,
+            joint: builder.joint_id,
+            locked_axes: (1 << crate::math::DIM) - 1,
+            frame_a: Pose::IDENTITY,
+            frame_b,
+            _padding: 0,
+        });
+    }
+    let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+    let selected = Tensor::vector(&backend, &[0u32, 1, 0], storage).unwrap();
+    let roots = Tensor::vector(&backend, &[root; 3], storage).unwrap();
+    let coords = Tensor::vector(&backend, &coordinates, storage).unwrap();
+    let vels = Tensor::vector(&backend, &velocities, storage).unwrap();
+    let motors = Tensor::vector(&backend, &motors, storage).unwrap();
+    let joints = Tensor::vector(&backend, &joint_commands, storage).unwrap();
+    let mut encoder = backend.begin_encoding();
+    state
+        .encode_articulation_motor_targets(&mut encoder, &kernels, &motors)
+        .unwrap();
+    state
+        .encode_articulation_impulse_joints(&mut encoder, &kernels, &joints)
+        .unwrap();
+    state
+        .encode_articulation_reset(&mut encoder, &kernels, &selected, &roots, &coords, &vels)
+        .unwrap();
+    backend.submit(encoder).unwrap();
+    let reset = _poses(&backend, &state).await;
+    let reset_vels = _read(&backend, state.body_velocities()).await;
+    let reset_dofs = _read(&backend, state.multibodies().dof_state()).await;
+    for body in 0..51 {
+        assert!(
+            reset[body * 3 + 1]
+                .translation
+                .distance(expected[body].translation)
+                < 2.0e-5,
+            "body {body} pose"
+        );
+        let expected_velocity = (next[body].translation - expected[body].translation) / epsilon;
+        assert!(
+            reset_vels[body * 3 + 1].linear.distance(expected_velocity) < 0.002,
+            "body {body} velocity: {:?} vs {expected_velocity:?}",
+            reset_vels[body * 3 + 1].linear
+        );
+        for batch in [0, 2] {
+            assert_eq!(reset[body * 3 + batch], before[body * 3 + batch]);
+            assert_eq!(
+                bytemuck::bytes_of(&reset_vels[body * 3 + batch]),
+                bytemuck::bytes_of(&before_vels[body * 3 + batch])
+            );
+        }
+    }
+    for (index, &value) in reset_dofs.iter().enumerate() {
+        if index < dpb * 3 && index % 3 == 1 {
+            assert_eq!(value, velocities[index]);
+        } else {
+            assert_eq!(value, before_dofs[index]);
+        }
+    }
+    // Reuse the same command tensors and kernels in a step encoder. Only the
+    // selection mask changes; no API performs staging or reads during encode.
+    for step in 0..12 {
+        let mut encoder = backend.begin_encoding();
+        state
+            .encode_articulation_motor_targets(&mut encoder, &kernels, &motors)
+            .unwrap();
+        state
+            .encode_articulation_impulse_joints(&mut encoder, &kernels, &joints)
+            .unwrap();
+        pipeline
+            .step_encoded(&backend, &mut state, None, &mut encoder)
+            .unwrap();
+        backend.submit(encoder).unwrap();
+        let poses = _poses(&backend, &state).await;
+        assert!(
+            poses.iter().all(|pose| pose.translation.is_finite()),
+            "nonfinite poses at controlled step {step}: {:?}",
+            poses
+                .iter()
+                .enumerate()
+                .filter(|(_, pose)| !pose.translation.is_finite())
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>()
+        );
+    }
+    let solved = _poses(&backend, &state).await;
+    let solved_vels = _read(&backend, state.body_velocities()).await;
+    assert!(solved.iter().all(|pose| pose.translation.is_finite()));
+    assert!(solved_vels.iter().all(|vel| vel.linear.is_finite()));
+    for branch in 0..5 {
+        let tip = 10 + branch * 10;
+        assert!(
+            solved[tip * 3 + 1]
+                .translation
+                .distance(expected[tip].translation)
+                < 0.01,
+            "branch {branch} external lock drift"
+        );
+    }
+    assert!(
+        solved[4].translation.distance(reset[4].translation) > 1.0e-5,
+        "active articulation did not move"
+    );
+    // Select two batches in a second reset and leave the controlled batch
+    // byte-for-byte unchanged, exercising mask updates on persistent inputs.
+    let mut selected = selected;
+    backend
+        .write_buffer(selected.buffer_mut(), 0, &[1u32, 0, 1])
+        .unwrap();
+    let mut encoder = backend.begin_encoding();
+    state
+        .encode_articulation_reset(&mut encoder, &kernels, &selected, &roots, &coords, &vels)
+        .unwrap();
+    backend.submit(encoder).unwrap();
+    let final_poses = _poses(&backend, &state).await;
+    for body in 0..state.num_active_bodies as usize {
+        assert_eq!(final_poses[body * 3 + 1], solved[body * 3 + 1]);
+    }
+}
+
 #[futures_test::test]
 async fn articulation_gpu_state_reset() {
     use crate::dynamics::GpuArticulationCommands;
