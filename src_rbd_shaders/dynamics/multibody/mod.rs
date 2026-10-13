@@ -15,6 +15,7 @@
 //! batch has a capacity; unused slots are padded out and skipped via per-batch
 //! length counts.
 
+mod articulated_body;
 mod commands;
 mod compute_dynamics_pre;
 mod contact_constraints;
@@ -35,6 +36,7 @@ mod types;
 mod utils;
 mod ws_soa;
 
+pub use articulated_body::*;
 pub use commands::*;
 pub use compute_dynamics_pre::*;
 pub use contact_constraints::*;

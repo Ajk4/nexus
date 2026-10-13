@@ -865,6 +865,212 @@ async fn articulation_roots_kinematics_and_dynamics() {
 }
 
 #[futures_test::test]
+async fn articulation_tree_inverse_matches_dense_operator() {
+    use crate::shaders::dynamics::{
+        ArticulatedBodyFactor, GpuMbAssembleMassMatrix, GpuMbComputeDynamicsPre,
+        GpuMbFactorArticulatedBody, GpuMbSolveArticulatedBody, TREE_SCRATCH_WIDTH,
+    };
+    use khal::backend::Encoder;
+    use khal::{BufferUsages, Shader};
+    use vortx::tensor::Tensor;
+    let backend = _backend().await;
+    for scene in [
+        _scene(false, false, false, false),
+        _scene(true, false, false, false),
+        _branched_scene(),
+    ] {
+        let (mut state, _) = _state(&backend, &[scene], 0., 1);
+        let indices = backend
+            .slow_read_vec(state.batch_indices.buffer())
+            .await
+            .unwrap()[0];
+        let infos = backend
+            .slow_read_vec(state.multibodies().multibody_info().buffer())
+            .await
+            .unwrap();
+        let mb = infos[0];
+        let n = mb.ndofs as usize;
+        let velocities: Vec<_> = (0..state.multibodies().dofs_per_batch())
+            .map(|d| (d as f32 * 0.37).sin() * 2.)
+            .collect();
+        backend
+            .write_buffer(
+                state.multibodies_mut().dof_state_mut().buffer_mut(),
+                0,
+                &velocities,
+            )
+            .unwrap();
+        let storage = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
+        let mut ws = Tensor::vector(
+            &backend,
+            backend
+                .slow_read_vec(state.multibodies().links_workspace().buffer())
+                .await
+                .unwrap(),
+            storage,
+        )
+        .unwrap();
+        let mut poses = Tensor::vector(
+            &backend,
+            backend
+                .slow_read_vec(state.body_poses().buffer())
+                .await
+                .unwrap(),
+            storage,
+        )
+        .unwrap();
+        let mut jac = Tensor::vector(
+            &backend,
+            vec![0.; state.multibodies().body_jacobians().len() as usize],
+            storage,
+        )
+        .unwrap();
+        let mut cor = Tensor::vector(
+            &backend,
+            vec![
+                0.;
+                (indices.coriolis_batch_capacity
+                    + indices.coriolis_batch_capacity / crate::shaders::DIM
+                        * crate::shaders::ANG_DIM) as usize
+            ],
+            storage,
+        )
+        .unwrap();
+        let mut dense = Tensor::vector(
+            &backend,
+            vec![0.; 2 * indices.mass_matrix_acc_section_offset as usize],
+            storage,
+        )
+        .unwrap();
+        let mut factors = Tensor::vector(
+            &backend,
+            bytemuck::zeroed_vec::<ArticulatedBodyFactor>(
+                state.multibodies().links_per_batch() as usize
+            ),
+            storage,
+        )
+        .unwrap();
+        let mut scratch = Tensor::vector(
+            &backend,
+            vec![0.; indices.mb_max_links as usize * TREE_SCRATCH_WIDTH],
+            storage,
+        )
+        .unwrap();
+        let dt = Tensor::scalar(
+            &backend,
+            0.017f32,
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        )
+        .unwrap();
+        #[derive(Shader)]
+        struct Kernels {
+            pre: GpuMbComputeDynamicsPre,
+            assemble: GpuMbAssembleMassMatrix,
+            factor: GpuMbFactorArticulatedBody,
+            solve: GpuMbSolveArticulatedBody,
+        }
+        let Kernels {
+            pre,
+            assemble,
+            factor,
+            solve,
+        } = Kernels::from_backend(&backend).unwrap();
+        let mut encoder = backend.begin_encoding();
+        {
+            let mut pass = encoder.begin_pass("tree oracle", None);
+            pre.call(
+                &mut pass,
+                [64, 1, 1],
+                state.multibodies().multibody_info(),
+                state.multibodies().links_static(),
+                &mut ws,
+                &mut poses,
+                &mut jac,
+                &mut cor,
+                state.multibodies().dof_state(),
+                &state.batch_indices,
+            )
+            .unwrap();
+            assemble
+                .call(
+                    &mut pass,
+                    [n as u32 * n as u32, 1, 1],
+                    state.multibodies().multibody_info(),
+                    state.multibodies().links_static(),
+                    &ws,
+                    &jac,
+                    &cor,
+                    state.multibodies().dof_state(),
+                    &mut dense,
+                    &dt,
+                    &state.batch_indices,
+                )
+                .unwrap();
+            factor
+                .call(
+                    &mut pass,
+                    1,
+                    state.multibodies().multibody_info(),
+                    state.multibodies().links_static(),
+                    &ws,
+                    state.multibodies().dof_state(),
+                    &mut factors,
+                    &dt,
+                    &state.batch_indices,
+                )
+                .unwrap();
+        }
+        backend.submit(encoder).unwrap();
+        let matrix = backend.slow_read_vec(dense.buffer()).await.unwrap();
+        for implicit in [0u32, 1] {
+            let mode = Tensor::scalar(
+                &backend,
+                implicit,
+                BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            )
+            .unwrap();
+            for column in 0..n {
+                let mut rhs = vec![0.; n];
+                rhs[column] = 1.;
+                let mut rhs = Tensor::vector(&backend, rhs, storage).unwrap();
+                let mut encoder = backend.begin_encoding();
+                {
+                    let mut pass = encoder.begin_pass("tree solve", None);
+                    solve
+                        .call(
+                            &mut pass,
+                            1,
+                            state.multibodies().multibody_info(),
+                            &factors,
+                            &mut rhs,
+                            &mut scratch,
+                            &state.batch_indices,
+                            &mode,
+                        )
+                        .unwrap();
+                }
+                backend.submit(encoder).unwrap();
+                let x = backend.slow_read_vec(rhs.buffer()).await.unwrap();
+                let base = if implicit != 0 {
+                    indices.mass_matrix_acc_section_offset as usize
+                } else {
+                    0
+                };
+                for row in 0..n {
+                    let product: f32 = (0..n).map(|d| matrix[base + d * n + row] * x[d]).sum();
+                    let expected = if row == column { 1. } else { 0. };
+                    assert!(
+                        (product - expected).abs() < 0.0003,
+                        "n={n} implicit={implicit} row={row} column={column}: residual {}",
+                        product - expected
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[futures_test::test]
 async fn articulation_limits_recover_out_of_range_joints() {
     let backend = _backend().await;
     let mut scenes = [_scene(true, false, false, false)];
