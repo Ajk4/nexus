@@ -130,8 +130,8 @@ pub fn gpu_mb_solve_constraints(
     let dofs_stride = batch_ids.dof_batch_capacity as usize;
 
     let jcons_base = batch_ids.mb_joint_constraints_start(batch_id) + mb.first_constraint as usize;
-    let jcol_base = batch_ids.mb_joint_constraint_columns_start(batch_id)
-        + (mb.first_constraint as usize) * dofs_stride;
+    let jcol_base = mb.first_constraint as usize * dofs_stride * batch_ids.num_batches as usize
+        + batch_id as usize;
 
     // This multibody's dynamic segment in the flat constraint buffer, and the
     // paired jac/column arena: slot `g` owns `2 * dofs_stride` dense floats,
@@ -213,8 +213,10 @@ pub fn gpu_mb_solve_constraints(
             joint_constraints.write(jcons_base + s as usize, updated);
         }
         if solve && lane < ndofs {
-            let col = joint_constraint_columns
-                .read(jcol_base + (s as usize) * dofs_stride + lane as usize);
+            let col = joint_constraint_columns.read(
+                jcol_base
+                    + (s as usize * dofs_stride + lane as usize) * batch_ids.num_batches as usize,
+            );
             dof_v._store(lane as usize, dof_v._load(lane as usize) - delta * col);
         }
         workgroup_memory_barrier_with_group_sync();
@@ -449,8 +451,8 @@ pub fn gpu_mb_solve_joints(
     let v_base = mb.first_dof as usize;
     let dofs_stride = batch_ids.dof_batch_capacity as usize;
     let jcons_base = batch_ids.mb_joint_constraints_start(batch_id) + mb.first_constraint as usize;
-    let jcol_base = batch_ids.mb_joint_constraint_columns_start(batch_id)
-        + (mb.first_constraint as usize) * dofs_stride;
+    let jcol_base = mb.first_constraint as usize * dofs_stride * batch_ids.num_batches as usize
+        + batch_id as usize;
 
     if active && lane < ndofs {
         dof_v._store(
@@ -512,8 +514,10 @@ pub fn gpu_mb_solve_joints(
             joint_constraints.write(jcons_base + s as usize, updated);
         }
         if solve && lane < ndofs {
-            let col = joint_constraint_columns
-                .read(jcol_base + (s as usize) * dofs_stride + lane as usize);
+            let col = joint_constraint_columns.read(
+                jcol_base
+                    + (s as usize * dofs_stride + lane as usize) * batch_ids.num_batches as usize,
+            );
             dof_v._store(lane as usize, dof_v._load(lane as usize) - delta * col);
         }
         workgroup_memory_barrier_with_group_sync();

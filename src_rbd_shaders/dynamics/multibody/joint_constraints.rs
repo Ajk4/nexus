@@ -572,19 +572,12 @@ pub fn gpu_mb_init_joint_constraints(
     }
 }
 
-/// Back-solves one M⁻¹ column per emitted joint-constraint slot and applies
-/// rapier's `finalize_generic_constraints`.
-///
-/// Split from [`gpu_mb_init_joint_constraints`] so that each pass stays within
-/// the 8-storage-buffer WebGPU limit. Must run after it, and after
-/// `gpu_mb_lu_decompose`, whose LU factors of `M` it consumes.
-///
-/// One 64-lane workgroup per (multibody, batch); lanes stride the slots.
+/// Applies the tree inverse to joint rows; adjacent lanes process matching
+/// constraint slots in different batches.
 #[spirv_bindgen]
 #[spirv(compute(threads(64)))]
 pub fn gpu_mb_finalize_joint_constraints(
-    #[spirv(workgroup_id)] workgroup_id: UVec3,
-    #[spirv(local_invocation_id)] local_id: UVec3,
+    #[spirv(global_invocation_id)] invocation_id: UVec3,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] multibody_info: &[MultibodyInfo],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)]
     joint_constraints: &mut [MultibodyJointConstraint],
@@ -595,70 +588,60 @@ pub fn gpu_mb_finalize_joint_constraints(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] tree_scratch: &mut [f32],
     #[spirv(uniform, descriptor_set = 0, binding = 5)] batch_ids: &BatchIndices,
 ) {
-    const LANES: u32 = 64;
-
-    let batch_id = workgroup_id.y;
-    let mb_idx = workgroup_id.x;
-    let lane = local_id.x;
+    let batch_id = invocation_id.x;
+    let mb_idx = invocation_id.z;
+    let s = invocation_id.y;
     let num_mb = batch_ids.multibodies_len;
-    let in_range = mb_idx < num_mb;
-    #[cfg(not(feature = "web-compat"))]
-    if !in_range {
+    if mb_idx >= num_mb || batch_id >= batch_ids.num_batches {
         return;
     }
-    let slot = if in_range { mb_idx } else { 0 };
-
-    let mb = batch_ids.ib(batch_id, multibody_info).read(slot as usize);
+    let mb = batch_ids.ib(batch_id, multibody_info).read(mb_idx as usize);
     let ndofs = mb.ndofs;
-    #[cfg(not(feature = "web-compat"))]
-    if ndofs == 0 {
+    if ndofs == 0 || s >= mb.max_constraints {
         return;
     }
-    let active = in_range && ndofs != 0;
 
     let cons_base = batch_ids.mb_joint_constraints_start(batch_id) + mb.first_constraint as usize;
     let dofs_stride = batch_ids.dof_batch_capacity as usize;
-    let col_base = batch_ids.mb_joint_constraint_columns_start(batch_id)
-        + (mb.first_constraint as usize) * dofs_stride;
     let factors = batch_ids
         .ib(batch_id, tree_factors)
         .offset(mb.first_link as usize);
 
-    if active {
-        for s in StepRng::new(lane..mb.max_constraints, LANES) {
-            let mut cons = joint_constraints.read(cons_base + s as usize);
-            if cons.kind == 0 {
-                continue;
-            }
-            let column = col_base + s as usize * dofs_stride;
-            for d in 0..ndofs {
-                let value = if d == cons.dof_id { 1. } else { 0. }
-                    - if d == cons.dof2_id {
-                        cons.coupling_coeff
-                    } else {
-                        0.
-                    };
-                joint_constraint_columns.write(column + d as usize, value);
-            }
-            _solve_tree(
-                &mb,
-                &factors,
-                false,
-                joint_constraint_columns,
-                VSlice::dense(column),
-                tree_scratch,
-                (cons_base + s as usize) * batch_ids.mb_max_links as usize * TREE_SCRATCH_WIDTH,
-                1,
-            );
-            let lhs = joint_constraint_columns.read(column + cons.dof_id as usize)
-                - cons.coupling_coeff
-                    * joint_constraint_columns.read(column + cons.dof2_id as usize);
-            let cfm_gain = lhs * cons.cfm_coeff + cons.cfm_gain;
-            cons.cfm_gain = cfm_gain;
-            cons.inv_lhs = inv(lhs + cfm_gain);
-            joint_constraints.write(cons_base + s as usize, cons);
-        }
+    let mut cons = joint_constraints.read(cons_base + s as usize);
+    if cons.kind == 0 {
+        return;
     }
+    let local_slot = mb.first_constraint as usize + s as usize;
+    let column = VSlice::interleaved(local_slot * dofs_stride, batch_ids.num_batches, batch_id);
+    for d in 0..ndofs {
+        let value = if d == cons.dof_id { 1. } else { 0. }
+            - if d == cons.dof2_id {
+                cons.coupling_coeff
+            } else {
+                0.
+            };
+        joint_constraint_columns.write(column.at(d), value);
+    }
+    _solve_tree(
+        &mb,
+        &factors,
+        false,
+        joint_constraint_columns,
+        column,
+        tree_scratch,
+        local_slot
+            * batch_ids.mb_max_links as usize
+            * TREE_SCRATCH_WIDTH
+            * batch_ids.num_batches as usize
+            + batch_id as usize,
+        batch_ids.num_batches as usize,
+    );
+    let lhs = joint_constraint_columns.read(column.at(cons.dof_id))
+        - cons.coupling_coeff * joint_constraint_columns.read(column.at(cons.dof2_id));
+    let cfm_gain = lhs * cons.cfm_coeff + cons.cfm_gain;
+    cons.cfm_gain = cfm_gain;
+    cons.inv_lhs = inv(lhs + cfm_gain);
+    joint_constraints.write(cons_base + s as usize, cons);
 }
 
 /// Per-substep refresh of the joint limit / motor slots, the cheap alternative

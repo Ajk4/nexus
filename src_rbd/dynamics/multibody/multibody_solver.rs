@@ -418,7 +418,11 @@ impl GpuMultibodySolver {
                 encoder.begin_pass("[RBD] mbb/finalize-joint", timestamps.as_deref_mut());
             self.finalize_joint_constraints.call(
                 &mut pass,
-                init_joint_dispatch,
+                [
+                    mb.num_batches,
+                    mb.max_joint_constraints,
+                    mb.multibodies_per_batch,
+                ],
                 &mb.multibody_info,
                 &mut mb.joint_constraints,
                 &mut mb.joint_constraint_columns,
