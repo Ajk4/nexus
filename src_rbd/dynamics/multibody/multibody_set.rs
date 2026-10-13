@@ -637,12 +637,33 @@ impl GpuMultibodySet {
         &self.links_workspace
     }
 
+    /// Mutable native workspace for on-device state initialization.
+    pub fn links_workspace_mut(&mut self) -> &mut Tensor<glamx::Vec4> {
+        &mut self.links_workspace
+    }
+
     /// Per-batch static link data (joint definitions, motors, limits, mass
     /// properties), batch-interleaved like [`Self::links_workspace`]. Exposed
     /// for diagnostics; use [`Self::set_motor`] / [`Self::set_motors`] to
     /// mutate motors so the CPU mirror stays in sync.
     pub fn links_static(&self) -> &Tensor<MultibodyLinkStatic> {
         &self.links_static
+    }
+
+    /// Mutable link descriptors for on-device joint control. Writes bypass
+    /// the host mirror; do not mix them with host motor setters.
+    pub fn links_static_mut(&mut self) -> &mut Tensor<MultibodyLinkStatic> {
+        &mut self.links_static
+    }
+
+    /// Native descriptors of impulse joints touching articulation links.
+    pub fn impulse_joint_builders(&self) -> &Tensor<MbImpulseJointBuilder> {
+        &self.mb_imp_joint_builders
+    }
+
+    /// Mutable descriptors for on-device anchor and joint updates.
+    pub fn impulse_joint_builders_mut(&mut self) -> &mut Tensor<MbImpulseJointBuilder> {
+        &mut self.mb_imp_joint_builders
     }
 
     /// Number of link slots per environment (the stride of
@@ -788,6 +809,11 @@ impl GpuMultibodySet {
     /// Per-multibody descriptors (contact counts, dof offsets, ...).
     pub fn multibody_info(&self) -> &Tensor<MultibodyInfo> {
         &self.multibody_info
+    }
+
+    /// Mutable metadata, including contact-history bounds for selective resets.
+    pub fn multibody_info_mut(&mut self) -> &mut Tensor<MultibodyInfo> {
+        &mut self.multibody_info
     }
 
     /// The per-multibody contact-constraint slabs.
