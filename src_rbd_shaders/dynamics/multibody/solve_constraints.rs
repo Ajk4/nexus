@@ -196,15 +196,16 @@ pub fn gpu_mb_solve_constraints(
             }
             delta = new_imp - cons.impulse;
 
-            if lane == 0 {
-                let mut cons = cons;
-                cons.impulse = new_imp;
-                joint_constraints.write(jcons_base + s as usize, cons);
-            }
         }
 
         // All lanes read `dof_v.read(dof_id)` above; sync before overwriting it.
         workgroup_memory_barrier_with_group_sync();
+        // All lanes must read the old impulse before lane 0 publishes the new one.
+        if solve && lane == 0 {
+            let mut updated = cons;
+            updated.impulse = cons.impulse + delta;
+            joint_constraints.write(jcons_base + s as usize, updated);
+        }
         if solve && lane < ndofs {
             let col = joint_constraint_columns
                 .read(jcol_base + (s as usize) * dofs_stride + lane as usize);
@@ -486,14 +487,15 @@ pub fn gpu_mb_solve_joints(
             }
             delta = new_imp - cons.impulse;
 
-            if lane == 0 {
-                let mut cons = cons;
-                cons.impulse = new_imp;
-                joint_constraints.write(jcons_base + s as usize, cons);
-            }
         }
 
         workgroup_memory_barrier_with_group_sync();
+        // All lanes must read the old impulse before lane 0 publishes the new one.
+        if solve && lane == 0 {
+            let mut updated = cons;
+            updated.impulse = cons.impulse + delta;
+            joint_constraints.write(jcons_base + s as usize, updated);
+        }
         if solve && lane < ndofs {
             let col = joint_constraint_columns
                 .read(jcol_base + (s as usize) * dofs_stride + lane as usize);
