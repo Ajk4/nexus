@@ -20,7 +20,7 @@ use khal_std::iter::StepRng;
 use khal_std::macros::{spirv, spirv_bindgen};
 use khal_std::sync::{atomic_add_u32, atomic_load_u32, workgroup_memory_barrier_with_group_sync};
 
-use super::articulated_body::{_solve_tree, ARTICULATED_FACTOR_WORDS, TREE_SCRATCH_WIDTH};
+use super::articulated_body::{_solve_tree, ARTICULATED_FACTOR_WORDS};
 use crate::broad_phase::ContactPlan;
 use crate::dynamics::ConstraintSoftness;
 use crate::dynamics::body::{Velocity, WorldMassProperties};
@@ -1004,8 +1004,8 @@ pub fn gpu_mb_finalize_contact_constraints(
             contact_jac_cols,
             VSlice::dense(col_offset),
             tree_scratch,
-            (cons_base + s as usize) * batch_ids.mb_max_links as usize * TREE_SCRATCH_WIDTH,
-            1,
+            cons_base + s as usize,
+            batch_ids.mb_contact_constraints_capacity as usize,
         );
         // 3b) Kinematic dofs are user-driven: the impulse must not move them.
         zero_kinematic_dofs(contact_jac_cols, col_offset, &stat_slice, mb.num_links);
