@@ -5,18 +5,19 @@ use crate::math::Pose;
 use crate::queries::GpuIndexedContact;
 use crate::shaders::broad_phase::ContactPlan;
 use crate::shaders::dynamics::{
-    GpuMbApplyContactRestitution, GpuMbBuildContactDelassus, GpuMbComputeDynamicsPre,
-    GpuMbComputeSolveBounds, GpuMbConsOffsetsScan, GpuMbCountContactConstraints, GpuMbDelayTick,
-    GpuMbFinalizeContactConstraints, GpuMbFinalizeImpulseJointConstraints,
-    GpuMbFinalizeJointConstraints, GpuMbGravityAndLu, GpuMbGravityAndLuT1, GpuMbGravityAndLuT8,
-    GpuMbGravityAndLuT16, GpuMbGravityAndLuT32, GpuMbInitContactConstraints,
-    GpuMbInitJointConstraints, GpuMbIntegrate, GpuMbIntegrateVelocities, GpuMbPublishState,
-    GpuMbRefreshJointConstraints, GpuMbRemoveImpulseJointConstraintBias, GpuMbSavePrevConsBounds,
-    GpuMbScatterContactIndex, GpuMbSeedContactRestitution, GpuMbSenseContactImpulses,
-    GpuMbSnapshotContactWarmstart, GpuMbSolveConstraints, GpuMbSolveContactsDelassus,
-    GpuMbSolveImpulseJointConstraints, GpuMbSolveJoints, GpuMbTransferContactWarmstart,
-    GpuMbTransportVelocities, GpuMbUpdateImpulseJointConstraints, GpuMbWarmstartContactConstraints,
-    MbContactIndexEntry, Velocity, WorldMassProperties,
+    GpuMbApplyContactRestitution, GpuMbAssembleMassMatrix, GpuMbBuildContactDelassus,
+    GpuMbComputeDynamicsPre, GpuMbComputeSolveBounds, GpuMbConsOffsetsScan,
+    GpuMbCountContactConstraints, GpuMbDelayTick, GpuMbFinalizeContactConstraints,
+    GpuMbFinalizeImpulseJointConstraints, GpuMbFinalizeJointConstraints, GpuMbGravityAndLu,
+    GpuMbGravityAndLuT1, GpuMbGravityAndLuT8, GpuMbGravityAndLuT16, GpuMbGravityAndLuT32,
+    GpuMbInitContactConstraints, GpuMbInitJointConstraints, GpuMbIntegrate,
+    GpuMbIntegrateVelocities, GpuMbPublishState, GpuMbRefreshJointConstraints,
+    GpuMbRemoveImpulseJointConstraintBias, GpuMbSavePrevConsBounds, GpuMbScatterContactIndex,
+    GpuMbSeedContactRestitution, GpuMbSenseContactImpulses, GpuMbSnapshotContactWarmstart,
+    GpuMbSolveConstraints, GpuMbSolveContactsDelassus, GpuMbSolveImpulseJointConstraints,
+    GpuMbSolveJoints, GpuMbTransferContactWarmstart, GpuMbTransportVelocities,
+    GpuMbUpdateImpulseJointConstraints, GpuMbWarmstartContactConstraints, MbContactIndexEntry,
+    Velocity, WorldMassProperties,
 };
 use crate::shaders::utils::BatchIndices;
 use khal::Shader;
@@ -35,6 +36,7 @@ pub struct GpuMultibodySolver {
     gravity_and_lu_t16: GpuMbGravityAndLuT16,
     gravity_and_lu_t32: GpuMbGravityAndLuT32,
     compute_dynamics_pre: GpuMbComputeDynamicsPre,
+    assemble_mass_matrix: GpuMbAssembleMassMatrix,
     init_joint_with_bias: GpuMbInitJointConstraints,
     /// M⁻¹-column back-solve for the joint constraints, split from the build
     /// pass so each fits 8 storage buffers.
@@ -844,8 +846,7 @@ impl GpuMultibodySolver {
         mb: &mut GpuMultibodySet,
         args: &mut MultibodySolverArgs<'_>,
     ) -> Result<(), GpuBackendError> {
-        // Fused FK + body-jacobians + velocity propagation + Mass-matrix
-        // assembly. Packed: `64 / mb_pack_lanes` multibodies per workgroup,
+        // Packed: `64 / mb_pack_lanes` multibodies per workgroup,
         // flattened (multibody, batch) grid.
         // The kernels read implicit-coriolis out of `batch_indices`, not off
         // this struct, so a flag set without rebuilding that uniform silently
@@ -865,9 +866,25 @@ impl GpuMultibodySolver {
             &mut mb.links_workspace,
             args.poses,
             &mut mb.body_jacobians,
-            &mut mb.mass_matrices,
             &mut mb.coriolis_packed,
             &mb.dof_state,
+            args.batch_indices,
+        )?;
+
+        self.assemble_mass_matrix.call(
+            pass,
+            [
+                (mb.max_ndofs * mb.max_ndofs).max(1),
+                mb.multibodies_per_batch * mb.num_batches,
+                1,
+            ],
+            &mb.multibody_info,
+            &mb.links_static,
+            &mb.links_workspace,
+            &mb.body_jacobians,
+            &mb.coriolis_packed,
+            &mb.dof_state,
+            &mut mb.mass_matrices,
             &mb.dt,
             args.batch_indices,
         )?;

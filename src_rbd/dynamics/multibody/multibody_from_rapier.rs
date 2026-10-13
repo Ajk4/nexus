@@ -63,7 +63,6 @@ impl GpuMultibodySet {
         let mut global_max_jac = 0u32;
         let mut global_max_mm = 0u32;
         let mut global_max_cor = 0u32;
-        let mut global_max_icdt = 0u32;
         let mut global_max_cons = 0u32;
         let mut global_max_couplings = 0u32;
 
@@ -91,7 +90,6 @@ impl GpuMultibodySet {
             let mut jac_off = 0u32;
             let mut mm_off = 0u32;
             let mut cor_off = 0u32;
-            let mut icdt_off = 0u32;
             let mut cons_off = 0u32;
             let mut coupling_off = 0u32;
 
@@ -177,7 +175,6 @@ impl GpuMultibodySet {
                     mass_matrix_offset: mm_off,
                     root_is_dynamic: if root_is_dynamic { 1 } else { 0 },
                     coriolis_offset: cor_off,
-                    i_coriolis_dt_offset: icdt_off,
                     first_constraint: cons_off,
                     max_constraints,
                     self_contacts_enabled: if mb.self_contacts_enabled() { 1 } else { 0 },
@@ -358,7 +355,6 @@ impl GpuMultibodySet {
                 jac_off += num_links * SPATIAL_DIM as u32 * ndofs;
                 mm_off += ndofs * ndofs;
                 cor_off += num_links * crate::math::DIM as u32 * ndofs;
-                icdt_off += SPATIAL_DIM as u32 * ndofs;
                 cons_off += max_constraints;
                 coupling_off += num_couplings;
             }
@@ -369,7 +365,6 @@ impl GpuMultibodySet {
             global_max_jac = global_max_jac.max(jac_off);
             global_max_mm = global_max_mm.max(mm_off);
             global_max_cor = global_max_cor.max(cor_off);
-            global_max_icdt = global_max_icdt.max(icdt_off);
             global_max_cons = global_max_cons.max(cons_off);
             global_max_couplings = global_max_couplings.max(coupling_off);
 
@@ -393,7 +388,6 @@ impl GpuMultibodySet {
         let jac_cap = global_max_jac.max(1);
         let mm_cap = global_max_mm.max(1);
         let cor_cap = global_max_cor.max(crate::math::DIM as u32);
-        let icdt_cap = global_max_icdt.max(1);
         let cons_cap = global_max_cons.max(1);
         let couplings_cap = global_max_couplings.max(1);
         // One length-`dofs_cap` column of `M⁻¹` per constraint slot.
@@ -475,8 +469,7 @@ impl GpuMultibodySet {
                         && info.ndofs == i0.ndofs
                         && info.jacobian_offset == i0.jacobian_offset
                         && info.mass_matrix_offset == i0.mass_matrix_offset
-                        && info.coriolis_offset == i0.coriolis_offset
-                        && info.i_coriolis_dt_offset == i0.i_coriolis_dt_offset,
+                        && info.coriolis_offset == i0.coriolis_offset,
                     "batch {b} multibody {i}: dynamics-arena layout differs from batch 0 \
                      (batched envs must have identical topology)"
                 );
@@ -647,8 +640,7 @@ impl GpuMultibodySet {
                 // Linear and angular blocks have DIM and ANG_DIM rows.
                 let a = (cor_cap * num_batches) as usize;
                 let w = a / crate::math::DIM * crate::shaders::ANG_DIM as usize;
-                let b = (icdt_cap * num_batches) as usize;
-                Tensor::vector(backend, vec![0.0f32; a + w + b], storage).unwrap()
+                Tensor::vector(backend, vec![0.0f32; a + w], storage).unwrap()
             },
             joint_constraints: Tensor::vector(
                 backend,

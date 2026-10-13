@@ -435,10 +435,6 @@ pub struct MultibodyInfo {
     /// `coriolis_w` (`ANG_DIM × ndofs` per link, offset scaled by `ANG_DIM/DIM`).
     /// Stacked link-by-link in assembly order.
     pub coriolis_offset: u32,
-    /// Offset (in f32 entries) into `i_coriolis_dt`. One `SPATIAL_DIM × ndofs`
-    /// scratch slot per multibody (transient — overwritten per link during
-    /// assembly).
-    pub i_coriolis_dt_offset: u32,
     /// First constraint index for this multibody in the `joint_constraints`
     /// buffer. Each multibody owns `max_constraints` contiguous slots; the
     /// init kernel marks unused slots with `kind = 0`.

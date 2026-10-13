@@ -1,12 +1,4 @@
-//! Fused FK + body-jacobians + velocity-propagation + CRBA mass-matrix
-//! kernel.
-//!
-//! Replaces a 4-dispatch chain
-//! (`gpu_mb_forward_kinematics` → `gpu_mb_body_jacobians` →
-//! `gpu_mb_update_velocities` → `gpu_mb_mass_matrix_with_coriolis`) with a
-//! single workgroup-parallel kernel (one workgroup per `(multibody, batch)`).
-//! The follow-up `gpu_mb_gravity_and_lu` kernel finishes the dynamics pipeline
-//! (gravity rhs + LU factor + LU solve).
+//! Batched kinematics, body Jacobians, velocities, and Coriolis derivatives.
 
 use glamx::Vec4;
 use khal_std::glamx::UVec3;
@@ -18,17 +10,16 @@ use super::types::{MultibodyInfo, MultibodyLinkStatic};
 use super::ws_soa::{
     WS_JOINT_ROT, WS_JOINT_VEL, WS_LTP, WS_LTW, WS_RB_VELS, WS_SHIFT02, WS_SHIFT23, WS_WORLD_COM,
     WsAddr, ws_coords, ws_pose, ws_rot, ws_set_pose, ws_set_vec, ws_set_vel, ws_vec, ws_vel,
-    ws_vel_ang, ws_world_inertia,
+    ws_vel_ang,
 };
 use crate::dynamics::body::Velocity;
 use crate::dynamics::joint::SPATIAL_DIM;
-use crate::utils::linalg::{
-    MatSlice, axpy_mat_par, copy_from_par, fill_par, gemm_inertia_lhs_par,
-    gemm_omega_skew_tr_cross_buf_par, gemm_skew_tr_lhs_cross_buf_par, gemm_skew_tr_lhs_par,
-    gemm_tr_par, quadform_spatial_par,
-};
 #[cfg(feature = "dim3")]
-use crate::utils::linalg::{gemm_inertia_lhs_cross_buf_par, gemm_skew_lhs_cross_buf_par};
+use crate::utils::linalg::gemm_skew_lhs_cross_buf_par;
+use crate::utils::linalg::{
+    MatSlice, copy_from_par, fill_par, gemm_omega_skew_tr_cross_buf_par,
+    gemm_skew_tr_lhs_cross_buf_par, gemm_skew_tr_lhs_par,
+};
 use crate::utils::{BatchIndices, ISlice, ISliceMut};
 use crate::{ANG_DIM, AngVector, DIM, Pose, Vector, gcross_av};
 use parry::math::VectorExt;
@@ -58,7 +49,7 @@ fn packed_decode(wg_id: UVec3, lid: UVec3, batch_ids: &BatchIndices) -> (u32, u3
     (t, lane, batch_id, mb_idx, active_slot)
 }
 
-/// Fused FK + body-jacobians + velocity propagation + CRBA mass matrix.
+/// Fused FK, body Jacobians, velocity propagation, and Coriolis derivatives.
 /// Coriolis blocks run only when implicit coriolis is enabled (non-zero
 /// `mass_matrix_acc_section_offset`).
 #[spirv_bindgen(force_cpu_coroutines)]
@@ -72,15 +63,11 @@ pub fn gpu_mb_compute_dynamics_pre(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] links_workspace: &mut [Vec4],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] poses: &mut [Pose],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] body_jacobians: &mut [f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] mass_matrices: &mut [f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 6)] coriolis_packed: &mut [f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 7)] dof_state: &[f32],
-    #[spirv(uniform, descriptor_set = 0, binding = 8)] dt_uniform: &f32,
-    #[spirv(uniform, descriptor_set = 0, binding = 9)] batch_ids: &BatchIndices,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] coriolis_packed: &mut [f32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 6)] dof_state: &[f32],
+    #[spirv(uniform, descriptor_set = 0, binding = 7)] batch_ids: &BatchIndices,
 ) {
     let (t, lane, batch_id, mb_idx, active_slot) = packed_decode(wg_id, lid, batch_ids);
-
-    let dt = *dt_uniform;
 
     let mb = if active_slot {
         batch_ids.ib(batch_id, multibody_info).read(mb_idx as usize)
@@ -101,13 +88,6 @@ pub fn gpu_mb_compute_dynamics_pre(
         batch_ids.coriolis_batch_capacity + mb.coriolis_offset / DIM * ANG_DIM,
         num_links * ANG_DIM * ndofs,
     );
-    let icdt0 = batch_ids.mb_region(
-        batch_id,
-        batch_ids.coriolis_batch_capacity
-            + batch_ids.coriolis_batch_capacity / DIM * ANG_DIM
-            + mb.i_coriolis_dt_offset,
-        SPATIAL_DIM as u32 * ndofs,
-    );
     let vel_base = mb.first_dof as usize;
 
     let stat_slice = batch_ids
@@ -115,22 +95,6 @@ pub fn gpu_mb_compute_dynamics_pre(
         .offset(mb.first_link as usize);
     let wa = WsAddr::new(mb.first_link as usize, batch_ids.num_batches, batch_id);
     let mut poses_slice = batch_ids.ib_mut(batch_id, poses);
-    let damping_slice = batch_ids
-        .ib(batch_id, dof_state)
-        .offset(batch_ids.dof_batch_capacity as usize + vel_base);
-    // Armature (reflected rotor inertia) section sits right after damping, at
-    // `2 · dof_batch_capacity`. Added to the mass-matrix diagonal alongside
-    // `damping·dt`, matching rapier's `update_mass_matrix`.
-    let armature_slice = batch_ids
-        .ib(batch_id, dof_state)
-        .offset(2 * batch_ids.dof_batch_capacity as usize + vel_base);
-    // Per-DoF spring stiffness, and kinematic-DoF mask.
-    let stiffness_slice = batch_ids
-        .ib(batch_id, dof_state)
-        .offset(3 * batch_ids.dof_batch_capacity as usize + vel_base);
-    let kin_mask_slice = batch_ids
-        .ib(batch_id, dof_state)
-        .offset(5 * batch_ids.dof_batch_capacity as usize + vel_base);
     let vel_slice = batch_ids.ib(batch_id, dof_state).offset(vel_base);
 
     // 1) Forward Kinematics (single-threaded)
@@ -166,42 +130,14 @@ pub fn gpu_mb_compute_dynamics_pre(
     }
     sync_slots(t);
 
-    // 3) Mass matrices. `split` (implicit coriolis on) builds two matrices:
-    // the plain one for constraints and the coriolis-augmented acc section for
-    // the acceleration solve. Otherwise only the plain matrix is built and the
-    // coriolis blocks are skipped entirely (forces stay explicit).
     let acc_section = batch_ids.mass_matrix_acc_section_offset;
     let split = acc_section != 0;
-    let mm_len = ndofs * ndofs;
-    let plain_mass = MatSlice::dense(
-        batch_ids.mb_region(batch_id, mb.mass_matrix_offset, mm_len),
-        ndofs,
-        ndofs,
-    );
-    let acc_augmented_mass = if split {
-        MatSlice::dense(
-            batch_ids.mb_region(batch_id, acc_section + mb.mass_matrix_offset, mm_len),
-            ndofs,
-            ndofs,
-        )
-    } else {
-        plain_mass
-    };
-    fill_par(mass_matrices, acc_augmented_mass, 0.0, lane, t);
-    if split {
-        fill_par(mass_matrices, plain_mass, 0.0, lane, t);
-    }
-
-    let i_coriolis_dt_view = MatSlice::dense(icdt0, SPATIAL_DIM as u32, ndofs);
-    let i_coriolis_dt_v = i_coriolis_dt_view.fixed_rows(0, DIM);
-    let i_coriolis_dt_w = i_coriolis_dt_view.fixed_rows(DIM, ANG_DIM);
 
     sync_slots(t);
 
     for k in 0..batch_ids.mb_max_links {
         let loop_is_active = k < num_links;
         let mut inv_mass_x = 0.0;
-        let mut mass = 0.0;
 
         if loop_is_active {
             let lmp = stat_slice[k as usize].local_mprops;
@@ -249,31 +185,8 @@ pub fn gpu_mb_compute_dynamics_pre(
             ndofs,
         );
         let rb_j_w = body_jacobian.fixed_rows(DIM, ANG_DIM);
-        let mut rb_inertia = Default::default();
 
         if loop_is_active {
-            let lmp = stat_slice[k as usize].local_mprops;
-            mass = 1.0 / inv_mass_x;
-            rb_inertia = ws_world_inertia(links_workspace, wa, k, &lmp);
-
-            let quad_target = if split {
-                plain_mass
-            } else {
-                acc_augmented_mass
-            };
-            quadform_spatial_par(
-                mass_matrices,
-                quad_target,
-                1.0,
-                mass,
-                rb_inertia,
-                body_jacobians,
-                body_jacobian,
-                1.0,
-                lane,
-                t,
-            );
-
             if split && k != 0 {
                 let stat = stat_slice[k as usize];
                 let parent_id = stat.parent_link_id;
@@ -473,102 +386,6 @@ pub fn gpu_mb_compute_dynamics_pre(
         }
 
         sync_slots(t);
-
-        if loop_is_active && split {
-            // i_coriolis_dt assembly: dt · (mass·coriolis_v, I·coriolis_w).
-            {
-                let scale = mass * dt;
-                let c = lane;
-                if c < ndofs {
-                    for r in 0..DIM {
-                        let v = coriolis_packed.read(coriolis_v_i.idx(r, c));
-                        coriolis_packed.write(i_coriolis_dt_v.idx(r, c), scale * v);
-                    }
-                }
-            }
-            gemm_inertia_lhs_par(
-                coriolis_packed,
-                i_coriolis_dt_w,
-                dt,
-                rb_inertia,
-                coriolis_w_i,
-                0.0,
-                lane,
-                t,
-            );
-
-            #[cfg(feature = "dim3")]
-            {
-                let angvel = ws_vel_ang(links_workspace, wa, k, WS_RB_VELS);
-                let w_skew = crate::utils::linalg::skew(angvel);
-                let i_omega_skew = crate::utils::linalg::skew(rb_inertia * angvel);
-                let gyro_mat = w_skew * rb_inertia - i_omega_skew;
-                gemm_inertia_lhs_cross_buf_par(
-                    coriolis_packed,
-                    i_coriolis_dt_w,
-                    dt,
-                    gyro_mat,
-                    body_jacobians,
-                    rb_j_w,
-                    1.0,
-                    lane,
-                    t,
-                );
-            }
-        }
-
-        sync_slots(t);
-
-        if loop_is_active && split {
-            gemm_tr_par(
-                mass_matrices,
-                acc_augmented_mass,
-                1.0,
-                body_jacobians,
-                body_jacobian,
-                coriolis_packed,
-                i_coriolis_dt_view,
-                1.0,
-                lane,
-                t,
-            );
-        }
-
-        sync_slots(t);
-    }
-
-    // Diagonal: M[i, i] += damping[i]·dt + armature[i] + stiffness[i]·dt²
-    let d = lane;
-    if d < ndofs {
-        let diag = damping_slice[d as usize] * dt
-            + armature_slice[d as usize]
-            + stiffness_slice[d as usize] * dt * dt;
-        let diag_target = if split {
-            plain_mass
-        } else {
-            acc_augmented_mass
-        };
-        let diag_idx = diag_target.idx(d, d);
-        let cur = mass_matrices.read(diag_idx);
-        mass_matrices.write(diag_idx, cur + diag);
-    }
-    sync_slots(t);
-
-    if split {
-        axpy_mat_par(mass_matrices, acc_augmented_mass, 1.0, plain_mass, lane, t);
-    }
-    sync_slots(t);
-
-    if d < ndofs && kin_mask_slice[d as usize] != 0.0 {
-        for j in 0..ndofs {
-            let v = if j == d { 1.0 } else { 0.0 };
-            mass_matrices.write(acc_augmented_mass.idx(d, j), v);
-            mass_matrices.write(acc_augmented_mass.idx(j, d), v);
-            if split {
-                mass_matrices.write(plain_mass.idx(d, j), v);
-                mass_matrices.write(plain_mass.idx(j, d), v);
-            }
-        }
     }
 }
 
