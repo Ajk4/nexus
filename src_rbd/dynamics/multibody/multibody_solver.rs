@@ -765,7 +765,7 @@ impl GpuMultibodySolver {
             &mb.links_static,
             &mut mb.links_workspace,
             &mut mb.dof_state,
-            &mb.body_jacobians,
+            &mb.tree_factors,
             args.batch_indices,
         )?;
         if !is_last_substep && (mb.implicit_coriolis || mb.substep_refresh) {

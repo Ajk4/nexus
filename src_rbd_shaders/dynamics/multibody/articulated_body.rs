@@ -54,11 +54,12 @@ pub struct ArticulatedBodyFactor {
     plain_inertia: Matrix,
     implicit_inertia: Matrix,
     implicit_derivative: Matrix,
+    velocity_motion: Matrix,
 }
 
 /// Scalar fields are interleaved across batches. Integer metadata and float
 /// bit patterns share one allocation, preserving the shader binding budget.
-pub const ARTICULATED_FACTOR_WORDS: usize = 4 + 15 * S * S;
+pub const ARTICULATED_FACTOR_WORDS: usize = 4 + 16 * S * S;
 
 fn _read_matrix(words: &ISlice<u32>, offset: usize) -> Matrix {
     let mut matrix = [0.; S * S];
@@ -94,6 +95,7 @@ fn _read_factor(words: &ISlice<u32>, node: usize) -> ArticulatedBodyFactor {
         plain_inertia: _read_matrix(words, offset + 4 + 12 * S * S),
         implicit_inertia: _read_matrix(words, offset + 4 + 13 * S * S),
         implicit_derivative: _read_matrix(words, offset + 4 + 14 * S * S),
+        velocity_motion: _read_matrix(words, offset + 4 + 15 * S * S),
     }
 }
 
@@ -119,6 +121,7 @@ fn _write_factor(words: &mut ISliceMut<u32>, node: usize, factor: ArticulatedBod
         words[offset + 4 + 12 * S * S + i] = factor.plain_inertia[i].to_bits();
         words[offset + 4 + 13 * S * S + i] = factor.implicit_inertia[i].to_bits();
         words[offset + 4 + 14 * S * S + i] = factor.implicit_derivative[i].to_bits();
+        words[offset + 4 + 15 * S * S + i] = factor.velocity_motion[i].to_bits();
     }
 }
 
@@ -438,6 +441,7 @@ pub fn gpu_mb_factor_articulated_body(
         let r23 = ws_vec(ws, wa, k, WS_SHIFT23);
         let mut x = [0.; S * S];
         let mut motion = [0.; S * S];
+        let mut velocity_motion = [0.; S * S];
         let mut f = [0.; S * S];
         let mut t = [0.; S * S];
         for c in 0..S {
@@ -457,6 +461,11 @@ pub fn gpu_mb_factor_articulated_body(
             let (v, dw) = link.joint_jacobian_column(
                 parent_pose.rotation * link.data.local_frame_a.rotation,
                 c as u32,
+            );
+            _column(
+                &mut velocity_motion,
+                c,
+                _spatial(v + gcross_av(dw, r23), dw),
             );
             if state[5 * stride + link.assembly_id as usize + c] == 0. {
                 _column(&mut motion, c, _spatial(v + gcross_av(dw, r23), dw));
@@ -526,6 +535,7 @@ pub fn gpu_mb_factor_articulated_body(
                 plain_inertia: inertia,
                 implicit_inertia,
                 implicit_derivative: derivative,
+                velocity_motion,
             },
         );
     }
@@ -584,6 +594,49 @@ pub fn gpu_mb_factor_articulated_body(
             _write_factor(&mut tree, node.parent as usize, parent);
         }
     }
+}
+
+/// Linear momentum at the configuration retained by the tree factors.
+pub(super) fn _tree_momentum(
+    count: u32,
+    links: &ISlice<MultibodyLinkStatic>,
+    factors: &ISlice<u32>,
+    velocities: &ISlice<f32>,
+    workspace: &mut [Vec4],
+    wa: WsAddr,
+) -> Vector {
+    let mut momentum = Vector::ZERO;
+    let mut error = Vector::ZERO;
+    for k in 0..count {
+        let offset = k as usize * ARTICULATED_FACTOR_WORDS;
+        let dof = factors[offset + 1] as usize;
+        let ndofs = factors[offset + 2] as usize;
+        let mut coordinates = [0.; S];
+        for d in 0..ndofs {
+            coordinates[d] = velocities[dof + d];
+        }
+        let mut velocity = _apply(_read_matrix(factors, offset + 4 + 15 * S * S), coordinates);
+        if k != 0 {
+            let parent = ws_vel(workspace, wa, factors[offset], WS_KIN_ACC);
+            let inherited = _apply(
+                _read_matrix(factors, offset + 4),
+                _spatial(parent.linear, parent.angular),
+            );
+            for i in 0..S {
+                velocity[i] += inherited[i];
+            }
+        }
+        let (linear, angular) = _parts(velocity);
+        ws_set_vel(workspace, wa, k, WS_KIN_ACC, Velocity::new(linear, angular));
+        let inverse_mass = links[k as usize].local_mprops.inv_mass.x;
+        if inverse_mass != 0. {
+            let term = linear / inverse_mass - error;
+            let next = momentum + term;
+            error = (next - momentum) - term;
+            momentum = next;
+        }
+    }
+    momentum
 }
 
 #[spirv_bindgen]

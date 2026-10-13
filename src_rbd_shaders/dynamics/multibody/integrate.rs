@@ -308,7 +308,7 @@ pub fn gpu_mb_integrate(
 }
 
 /// Carry velocity through the configuration change after both constraint
-/// sweeps. The old Jacobians still describe the impulses just solved.
+/// sweeps. The retained tree transforms describe the impulses just solved.
 #[spirv_bindgen]
 #[spirv(compute(threads(64)))]
 pub fn gpu_mb_transport_velocities(
@@ -318,66 +318,36 @@ pub fn gpu_mb_transport_velocities(
     links_static: &[MultibodyLinkStatic],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] links_workspace: &mut [Vec4],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] dof_state: &mut [f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] jacobians: &[f32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] factors: &[u32],
     #[spirv(uniform, descriptor_set = 0, binding = 5)] batch_ids: &BatchIndices,
 ) {
     let count = batch_ids.multibodies_len;
     if id.x >= count * batch_ids.num_batches {
         return;
     }
-    let batch = id.x / count;
+    let batch = id.x % batch_ids.num_batches;
     let mb = batch_ids
         .ib(batch, multibody_info)
-        .read((id.x % count) as usize);
+        .read((id.x / batch_ids.num_batches) as usize);
     let links = batch_ids
         .ib(batch, links_static)
         .offset(mb.first_link as usize);
     if mb.root_is_dynamic == 0 || links[0].data.locked_axes & ((1 << DIM) - 1) != 0 {
         return;
     }
-    let base = batch_ids.mb_region(
-        batch,
-        mb.jacobian_offset,
-        mb.num_links * crate::dynamics::SPATIAL_DIM as u32 * mb.ndofs,
-    );
     let velocities = batch_ids.ib(batch, dof_state).offset(mb.first_dof as usize);
-    let mut momentum = Vector::ZERO;
-    let mut error = Vector::ZERO;
-    for k in 0..mb.num_links {
-        let inverse_mass = links[k as usize].local_mprops.inv_mass.x;
-        if inverse_mass == 0.0 {
-            continue;
-        }
-        let matrix = crate::utils::linalg::MatSlice::dense(
-            base + k as usize * crate::dynamics::SPATIAL_DIM * mb.ndofs as usize,
-            crate::dynamics::SPATIAL_DIM as u32,
-            mb.ndofs,
-        );
-        let mut velocity = Vector::ZERO;
-        let mut velocity_error = Vector::ZERO;
-        for d in 0..mb.ndofs {
-            #[cfg(feature = "dim2")]
-            let column = Vector::new(
-                jacobians.read(matrix.idx(0, d)),
-                jacobians.read(matrix.idx(1, d)),
-            );
-            #[cfg(feature = "dim3")]
-            let column = Vector::new(
-                jacobians.read(matrix.idx(0, d)),
-                jacobians.read(matrix.idx(1, d)),
-                jacobians.read(matrix.idx(2, d)),
-            );
-            let term = column * velocities[d as usize] - velocity_error;
-            let next = velocity + term;
-            velocity_error = (next - velocity) - term;
-            velocity = next;
-        }
-        let term = velocity / inverse_mass - error;
-        let next = momentum + term;
-        error = (next - momentum) - term;
-        momentum = next;
-    }
     let wa = WsAddr::new(mb.first_link as usize, batch_ids.num_batches, batch);
+    let factors = batch_ids
+        .ib(batch, factors)
+        .offset(mb.first_link as usize * super::articulated_body::ARTICULATED_FACTOR_WORDS);
+    let momentum = super::articulated_body::_tree_momentum(
+        mb.num_links,
+        &links,
+        &factors,
+        &velocities,
+        links_workspace,
+        wa,
+    );
     _propagate_velocities(mb.num_links, &links, &velocities, links_workspace, wa);
     let (mass, _, current) = _centroid(&links, links_workspace, wa, mb.num_links);
     let mut velocities = batch_ids
