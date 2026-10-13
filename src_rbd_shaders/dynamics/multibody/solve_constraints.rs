@@ -24,6 +24,7 @@ const LANES: u32 = 64;
 /// tangent rows of a contact point are capped jointly; in 2D there is a single
 /// row and this degenerates to a scalar clamp.
 #[inline]
+#[cfg(feature = "dim3")]
 fn cap_friction(t0: f32, t1: f32, limit: f32) -> (f32, f32) {
     let norm_sq = t0 * t0 + t1 * t1;
     if norm_sq > limit * limit && norm_sq > 0.0 {
@@ -32,6 +33,12 @@ fn cap_friction(t0: f32, t1: f32, limit: f32) -> (f32, f32) {
     } else {
         (t0, t1)
     }
+}
+
+#[inline]
+#[cfg(feature = "dim2")]
+fn cap_friction(t0: f32, _t1: f32, limit: f32) -> (f32, f32) {
+    (t0.clamp(-limit, limit), 0.0)
 }
 
 /// Calculate the maximum `contact_constraint_count` over every (multibody, batch).
@@ -96,8 +103,7 @@ pub fn gpu_mb_solve_constraints(
     #[spirv(storage_buffer, descriptor_set = 1, binding = 1)] solver_vels: &mut [Velocity],
     #[spirv(workgroup)] dof_v: &mut [f32; MAX_MB_DOFS],
     #[spirv(workgroup)] scratch: &mut [f32; LANES as usize],
-    #[spirv(workgroup)] delta_shared: &mut f32,
-    #[spirv(workgroup)] delta2_shared: &mut f32,
+    #[spirv(workgroup)] deltas_shared: &mut [f32; crate::DIM as usize - 1],
 ) {
     let batch_id = workgroup_id.y;
     let mb_idx = workgroup_id.x;
@@ -289,7 +295,11 @@ pub fn gpu_mb_solve_constraints(
         workgroup_memory_barrier_with_group_sync();
 
         if solve && lane == 0 {
-            let cons2 = contact_constraints.read(ccons_base + (s + 1) as usize);
+            let cons2 = if has_pair {
+                contact_constraints.read(ccons_base + (s + 1) as usize)
+            } else {
+                super::types::MultibodyContactConstraint::default()
+            };
             let mut j_dot_v1 = 0.0f32;
             if has_pair {
                 for i in 0..ndofs {
@@ -349,8 +359,9 @@ pub fn gpu_mb_solve_constraints(
             if has_pair {
                 contact_constraints.at_mut(cons_idx + 1).impulse = new1;
             }
-            *delta_shared = delta0;
-            *delta2_shared = delta1;
+            deltas_shared.write(0, delta0);
+            #[cfg(feature = "dim3")]
+            { deltas_shared.write(1, delta1); }
 
             if !is_self && (delta0 != 0.0 || delta1 != 0.0) {
                 let mut new_free = free;
@@ -366,8 +377,11 @@ pub fn gpu_mb_solve_constraints(
         workgroup_memory_barrier_with_group_sync();
 
         // Per-lane `dof_v.read(lane)` update.
-        let delta0 = *delta_shared;
-        let delta1 = *delta2_shared;
+        let delta0 = deltas_shared.read(0);
+        #[cfg(feature = "dim3")]
+        let delta1 = deltas_shared.read(1);
+        #[cfg(feature = "dim2")]
+        let delta1 = 0.0;
         if solve && lane < ndofs {
             if delta0 != 0.0 {
                 let col = contact_jac_cols.read(jac_offset + dofs_stride + lane as usize);

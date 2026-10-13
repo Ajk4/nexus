@@ -7,7 +7,8 @@ fn angular_jacobians_match_rotating_point_velocity() {
     let angular = 0.7;
     let dt = 0.001;
     let expected = (Rot2::from_angle(angular * dt) * point
-        - Rot2::from_angle(-angular * dt) * point) / (2.0 * dt);
+        - Rot2::from_angle(-angular * dt) * point)
+        / (2.0 * dt);
     let c = MatSlice::dense(0, 2, 1);
     let b = MatSlice::dense(0, 1, 1);
     let mut serial = [0.0; 2];
@@ -29,7 +30,18 @@ fn angular_jacobians_match_rotating_point_velocity() {
     let mut serial = [0.0; 2];
     let mut parallel = serial;
     gemm_omega_skew_tr_cross_buf(&mut serial, c, 1.0, angular, point, &[angular], b, 0.0);
-    gemm_omega_skew_tr_cross_buf_par(&mut parallel, c, 1.0, angular, point, &[angular], b, 0.0, 0, 1);
+    gemm_omega_skew_tr_cross_buf_par(
+        &mut parallel,
+        c,
+        1.0,
+        angular,
+        point,
+        &[angular],
+        b,
+        0.0,
+        0,
+        1,
+    );
     // A point rotating at constant speed accelerates toward the center.
     let expected_acceleration = -point * angular * angular;
     for result in [serial, parallel] {
