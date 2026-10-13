@@ -46,11 +46,12 @@ mod layout {
 }
 
 /*
- * Per-link QUAD offsets of each field (dim2): 11 quads / 176 B per link.
+ * Per-link QUAD offsets of each field (dim2): 9 quads / 144 B per link.
+ * Vector selectors with bit 16 set address the upper half of a quad.
  */
 #[cfg(feature = "dim2")]
 mod layout {
-    /// Joint rotation (re, im, pad, pad).
+    /// Joint rotation (re, im) with the world COM in the upper half.
     pub const WS_JOINT_ROT: u32 = 0;
     /// Generalized coordinates c0..c2, pad.
     pub const WS_COORDS: u32 = 1;
@@ -58,27 +59,46 @@ mod layout {
     pub const WS_LTP: u32 = 2;
     /// Local-to-world: (rot.re, rot.im, trans.x, trans.y), one quad.
     pub const WS_LTW: u32 = 3;
-    /// shift02 x, y, pad, pad.
+    /// shift02 x, y with shift23 in the upper half.
     pub const WS_SHIFT02: u32 = 4;
-    /// shift23 x, y, pad, pad.
-    pub const WS_SHIFT23: u32 = 5;
+    /// shift23 x, y in the upper half of [`WS_SHIFT02`]. Use the vector accessor.
+    pub const WS_SHIFT23: u32 = (1 << 16) | WS_SHIFT02;
     /// Joint velocity: (lin.x, lin.y, ang, pad).
-    pub const WS_JOINT_VEL: u32 = 6;
+    pub const WS_JOINT_VEL: u32 = 5;
     /// Rigid-body velocity: (lin.x, lin.y, ang, pad).
-    pub const WS_RB_VELS: u32 = 7;
+    pub const WS_RB_VELS: u32 = 6;
     /// Kinematic acceleration: (lin.x, lin.y, ang, pad).
-    pub const WS_KIN_ACC: u32 = 8;
-    /// World-space center of mass of the link: x, y, pad, pad.
-    pub const WS_WORLD_COM: u32 = 9;
+    pub const WS_KIN_ACC: u32 = 7;
+    /// World COM in the upper half of [`WS_JOINT_ROT`]. Use the vector accessor.
+    pub const WS_WORLD_COM: u32 = (1 << 16) | WS_JOINT_ROT;
     /// User-applied wrench: force x, y | torque | gravity scale.
-    pub const WS_EXT_FORCE: u32 = 10;
+    pub const WS_EXT_FORCE: u32 = 8;
     /// Alias of [`WS_EXT_FORCE`]: in 2D the whole wrench fits one quad.
-    pub const WS_EXT_TORQUE: u32 = 10;
+    pub const WS_EXT_TORQUE: u32 = 8;
     /// Total quads per link (per-link stride, in quad units).
-    pub const WS_QUADS: u32 = 11;
+    pub const WS_QUADS: u32 = 9;
 }
 
 pub use layout::*;
+
+#[cfg(all(test, feature = "dim2"))]
+#[test]
+fn packed_planar_vectors_preserve_their_neighbors() {
+    let mut buf = [Vec4::ZERO; WS_QUADS as usize];
+    let a = WsAddr::new(0, 1, 0);
+    let shift02 = Vec2::new(1.3, -0.8);
+    let shift23 = Vec2::new(-0.5, 0.2);
+    let com = Vec2::new(4.0, -3.0);
+    ws_set_vec(&mut buf, a, 0, WS_SHIFT02, shift02);
+    ws_set_vec(&mut buf, a, 0, WS_SHIFT23, shift23);
+    ws_set_vec(&mut buf, a, 0, WS_WORLD_COM, com);
+    let rotation = Rotation::from_angle(0.7);
+    ws_set_rot(&mut buf, a, 0, WS_JOINT_ROT, rotation);
+    assert_eq!(ws_vec(&buf, a, 0, WS_SHIFT02), shift02);
+    assert_eq!(ws_vec(&buf, a, 0, WS_SHIFT23), shift23);
+    assert_eq!(ws_vec(&buf, a, 0, WS_WORLD_COM), com);
+    assert_eq!(ws_rot(&buf, a, 0, WS_JOINT_ROT), rotation);
+}
 
 /// Addressing view over the SoA workspace buffer for one multibody of one
 /// batch: `base` is the multibody's first link (intra-batch), `stride` /
@@ -144,7 +164,8 @@ pub fn ws_set_rot(buf: &mut [Vec4], a: WsAddr, k: u32, f: u32, r: Rotation) {
 #[cfg(feature = "dim2")]
 #[inline]
 pub fn ws_set_rot(buf: &mut [Vec4], a: WsAddr, k: u32, f: u32, r: Rotation) {
-    buf.write(a.at(k, f), Vec4::new(r.re, r.im, 0.0, 0.0));
+    let old = buf.read(a.at(k, f));
+    buf.write(a.at(k, f), Vec4::new(r.re, r.im, old.z, old.w));
 }
 
 #[cfg(feature = "dim3")]
@@ -157,8 +178,8 @@ pub fn ws_vec(buf: &[Vec4], a: WsAddr, k: u32, f: u32) -> Vector {
 #[cfg(feature = "dim2")]
 #[inline]
 pub fn ws_vec(buf: &[Vec4], a: WsAddr, k: u32, f: u32) -> Vector {
-    let q = buf.read(a.at(k, f));
-    Vec2::new(q.x, q.y)
+    let q = buf.read(a.at(k, f & 0xffff));
+    if f & (1 << 16) != 0 { Vec2::new(q.z, q.w) } else { Vec2::new(q.x, q.y) }
 }
 
 #[cfg(feature = "dim3")]
@@ -170,7 +191,14 @@ pub fn ws_set_vec(buf: &mut [Vec4], a: WsAddr, k: u32, f: u32, v: Vector) {
 #[cfg(feature = "dim2")]
 #[inline]
 pub fn ws_set_vec(buf: &mut [Vec4], a: WsAddr, k: u32, f: u32, v: Vector) {
-    buf.write(a.at(k, f), Vec4::new(v.x, v.y, 0.0, 0.0));
+    let idx = a.at(k, f & 0xffff);
+    let old = buf.read(idx);
+    let q = if f & (1 << 16) != 0 {
+        Vec4::new(old.x, old.y, v.x, v.y)
+    } else {
+        Vec4::new(v.x, v.y, old.z, old.w)
+    };
+    buf.write(idx, q);
 }
 
 /// User-applied external wrench and per-link gravity scale, packed into
