@@ -10,13 +10,13 @@ use crate::shaders::dynamics::{
     GpuMbConsOffsetsScan, GpuMbCountContactConstraints, GpuMbDelayTick, GpuMbFactorArticulatedBody,
     GpuMbFinalizeContactConstraints, GpuMbFinalizeImpulseJointConstraints,
     GpuMbFinalizeJointConstraints, GpuMbInitContactConstraints, GpuMbInitJointConstraints,
-    GpuMbIntegrate, GpuMbIntegrateVelocities, GpuMbPublishState, GpuMbRefreshJointConstraints,
-    GpuMbRemoveImpulseJointConstraintBias, GpuMbSavePrevConsBounds, GpuMbScatterContactIndex,
-    GpuMbSeedContactRestitution, GpuMbSenseContactImpulses, GpuMbSnapshotContactWarmstart,
-    GpuMbSolveConstraints, GpuMbSolveContactsDelassus, GpuMbSolveImpulseJointConstraints,
-    GpuMbSolveJoints, GpuMbTransferContactWarmstart, GpuMbTransportVelocities,
-    GpuMbUpdateImpulseJointConstraints, GpuMbWarmstartContactConstraints, MbContactIndexEntry,
-    Velocity, WorldMassProperties,
+    GpuMbInitializeArticulatedBody, GpuMbIntegrate, GpuMbIntegrateVelocities, GpuMbPublishState,
+    GpuMbRefreshJointConstraints, GpuMbRemoveImpulseJointConstraintBias, GpuMbSavePrevConsBounds,
+    GpuMbScatterContactIndex, GpuMbSeedContactRestitution, GpuMbSenseContactImpulses,
+    GpuMbSnapshotContactWarmstart, GpuMbSolveConstraints, GpuMbSolveContactsDelassus,
+    GpuMbSolveImpulseJointConstraints, GpuMbSolveJoints, GpuMbTransferContactWarmstart,
+    GpuMbTransportVelocities, GpuMbUpdateImpulseJointConstraints, GpuMbWarmstartContactConstraints,
+    MbContactIndexEntry, Velocity, WorldMassProperties,
 };
 use crate::shaders::utils::BatchIndices;
 use khal::Shader;
@@ -27,6 +27,7 @@ use vortx::tensor::Tensor;
 #[derive(Shader)]
 pub struct GpuMultibodySolver {
     compute_kinematics: GpuMbComputeKinematics,
+    initialize_tree: GpuMbInitializeArticulatedBody,
     factor_tree: GpuMbFactorArticulatedBody,
     build_joint_response_columns: GpuMbBuildJointResponseColumns,
     apply_forces: GpuMbApplyArticulatedBodyForces,
@@ -879,12 +880,22 @@ impl GpuMultibodySolver {
             args.batch_indices,
         )?;
 
+        self.initialize_tree.call(
+            pass,
+            mb.links_per_batch * mb.num_batches,
+            &mb.multibody_info,
+            &mb.links_static,
+            &mb.links_workspace,
+            &mb.dof_state,
+            &mut mb.tree_factors,
+            &mb.dt,
+            args.batch_indices,
+        )?;
+
         self.factor_tree.call(
             pass,
             mb.flat_mb_dispatch(),
             &mb.multibody_info,
-            &mb.links_static,
-            &mb.links_workspace,
             &mb.dof_state,
             &mut mb.tree_factors,
             &mb.dt,

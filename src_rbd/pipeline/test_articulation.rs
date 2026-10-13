@@ -963,7 +963,8 @@ async fn articulation_roots_kinematics_and_dynamics() {
 async fn articulation_tree_inverse_matches_dense_operator() {
     use crate::shaders::dynamics::{
         ARTICULATED_FACTOR_WORDS, GpuMbAssembleMassMatrix, GpuMbComputeDynamicsPre,
-        GpuMbFactorArticulatedBody, GpuMbSolveArticulatedBody, TREE_SCRATCH_WIDTH,
+        GpuMbFactorArticulatedBody, GpuMbInitializeArticulatedBody, GpuMbSolveArticulatedBody,
+        TREE_SCRATCH_WIDTH,
     };
     use khal::backend::Encoder;
     use khal::{BufferUsages, Shader};
@@ -1059,12 +1060,14 @@ async fn articulation_tree_inverse_matches_dense_operator() {
         struct Kernels {
             pre: GpuMbComputeDynamicsPre,
             assemble: GpuMbAssembleMassMatrix,
+            initialize: GpuMbInitializeArticulatedBody,
             factor: GpuMbFactorArticulatedBody,
             solve: GpuMbSolveArticulatedBody,
         }
         let Kernels {
             pre,
             assemble,
+            initialize,
             factor,
             solve,
         } = Kernels::from_backend(&backend).unwrap();
@@ -1099,13 +1102,24 @@ async fn articulation_tree_inverse_matches_dense_operator() {
                     &state.batch_indices,
                 )
                 .unwrap();
+            initialize
+                .call(
+                    &mut pass,
+                    state.multibodies().links_per_batch(),
+                    state.multibodies().multibody_info(),
+                    state.multibodies().links_static(),
+                    &ws,
+                    state.multibodies().dof_state(),
+                    &mut factors,
+                    &dt,
+                    &state.batch_indices,
+                )
+                .unwrap();
             factor
                 .call(
                     &mut pass,
                     1,
                     state.multibodies().multibody_info(),
-                    state.multibodies().links_static(),
-                    &ws,
                     state.multibodies().dof_state(),
                     &mut factors,
                     &dt,

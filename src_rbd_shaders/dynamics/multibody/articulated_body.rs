@@ -423,7 +423,7 @@ pub(super) fn _solve_tree(
 
 #[spirv_bindgen]
 #[spirv(compute(threads(64)))]
-pub fn gpu_mb_factor_articulated_body(
+pub fn gpu_mb_initialize_articulated_body(
     #[spirv(global_invocation_id)] id: UVec3,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] infos: &[MultibodyInfo],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] links: &[MultibodyLinkStatic],
@@ -433,22 +433,21 @@ pub fn gpu_mb_factor_articulated_body(
     #[spirv(uniform, descriptor_set = 0, binding = 5)] dt: &f32,
     #[spirv(uniform, descriptor_set = 0, binding = 6)] batches: &BatchIndices,
 ) {
-    if id.x >= batches.num_batches * batches.multibodies_len {
+    if id.x >= batches.num_batches * batches.links_batch_capacity {
         return;
     }
     let batch = id.x % batches.num_batches;
-    let mb = batches
-        .ib(batch, infos)
-        .read((id.x / batches.num_batches) as usize);
-    let stat = batches.ib(batch, links).offset(mb.first_link as usize);
+    let link_id = id.x / batches.num_batches;
+    let link = batches.ib(batch, links).read(link_id as usize);
+    let mb = batches.ib(batch, infos).read(link.multibody_id as usize);
+    let k = link_id - mb.first_link;
     let wa = WsAddr::new(mb.first_link as usize, batches.num_batches, batch);
     let state = batches.ib(batch, dofs).offset(mb.first_dof as usize);
     let stride = batches.dof_batch_capacity as usize;
     let mut tree = batches
         .ib_mut(batch, factors)
         .offset(mb.first_link as usize * ARTICULATED_FACTOR_WORDS);
-    for k in 0..mb.num_links {
-        let link = stat[k as usize];
+    {
         let parent_pose = if k == 0 {
             Pose::default()
         } else {
@@ -563,6 +562,30 @@ pub fn gpu_mb_factor_articulated_body(
             },
         );
     }
+}
+
+#[spirv_bindgen]
+#[spirv(compute(threads(64)))]
+pub fn gpu_mb_factor_articulated_body(
+    #[spirv(global_invocation_id)] id: UVec3,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] infos: &[MultibodyInfo],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] dofs: &[f32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] factors: &mut [u32],
+    #[spirv(uniform, descriptor_set = 0, binding = 3)] dt: &f32,
+    #[spirv(uniform, descriptor_set = 0, binding = 4)] batches: &BatchIndices,
+) {
+    if id.x >= batches.num_batches * batches.multibodies_len {
+        return;
+    }
+    let batch = id.x % batches.num_batches;
+    let mb = batches
+        .ib(batch, infos)
+        .read((id.x / batches.num_batches) as usize);
+    let state = batches.ib(batch, dofs).offset(mb.first_dof as usize);
+    let stride = batches.dof_batch_capacity as usize;
+    let mut tree = batches
+        .ib_mut(batch, factors)
+        .offset(mb.first_link as usize * ARTICULATED_FACTOR_WORDS);
     for reverse in 0..mb.num_links {
         let k = mb.num_links - 1 - reverse;
         let offset = k as usize * ARTICULATED_FACTOR_WORDS;
