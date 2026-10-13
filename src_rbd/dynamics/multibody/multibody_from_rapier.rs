@@ -5,7 +5,7 @@ use crate::shaders::dynamics::{
     ConstraintSoftness, MAX_AXIS_CONSTRAINTS, MAX_MB_CONTACT_CONSTRAINTS_PER_MB, MbDelayTickParams,
     MbDofCoupling, MbImpulseJointBuilder, MbImpulseJointConstraint, MultibodyContactConstraint,
     MultibodyInfo, MultibodyJointConstraint, MultibodyLinkStatic, MultibodyLinkWorkspace,
-    RbdSimParams,
+    RbdSimParams, SPATIAL_DIM,
 };
 use crate::shaders::utils::linalg::MAX_MB_DOFS;
 use khal::BufferUsages;
@@ -105,10 +105,10 @@ impl GpuMultibodySet {
                     );
                 }
 
-                // rapier always creates the root with a free 6-DOF joint and only
+                // rapier always creates the root with a free joint and only
                 // converts it to a fixed joint later during its own step. Since we
                 // don't run rapier's step here, detect a fixed root body and lock
-                // all 6 DOFs ourselves.
+                // all spatial DOFs ourselves.
                 let root_is_dynamic = mb
                     .link(0)
                     .and_then(|r| bodies.get(r.rigid_body_handle()))
@@ -146,7 +146,7 @@ impl GpuMultibodySet {
                         let locked = j.locked_axes.bits() as u32;
                         let limit_axes = j.limit_axes.bits() as u32 & !locked;
                         let mut n = 0u32;
-                        for ax in 0u32..6 {
+                        for ax in 0u32..SPATIAL_DIM as u32 {
                             if (limit_axes >> ax) & 1 != 0 {
                                 n += 1;
                             }
@@ -217,10 +217,10 @@ impl GpuMultibodySet {
                         None => u32::MAX,
                     };
 
-                    // Lock all 6 DOFs on the root if its body is fixed.
+                    // Lock every spatial DOF on a fixed root.
                     let mut data = convert_generic_joint(link.joint().data);
                     let link_ndofs = if link_idx == 0 && !root_is_dynamic {
-                        data.locked_axes = 0x3f;
+                        data.locked_axes = (1 << SPATIAL_DIM) - 1;
                         0u32
                     } else {
                         link.joint().ndofs() as u32
@@ -240,8 +240,15 @@ impl GpuMultibodySet {
                     // contribute to the CRBA mass matrix (rapier skips them too).
                     let mp = if link_idx == 0 && !root_is_dynamic {
                         let mut z = mp;
-                        z.inv_mass = glamx::Vec3::ZERO;
-                        z.inv_principal_inertia = glamx::Vec3::ZERO;
+                        z.inv_mass = crate::math::Vector::ZERO;
+                        #[cfg(feature = "dim3")]
+                        {
+                            z.inv_principal_inertia = glamx::Vec3::ZERO;
+                        }
+                        #[cfg(feature = "dim2")]
+                        {
+                            z.inv_inertia = 0.0;
+                        }
                         z
                     } else {
                         mp
@@ -254,6 +261,7 @@ impl GpuMultibodySet {
                         assembly_id: assembly_counter,
                         ndofs: link_ndofs,
                         kinematic: if link.joint().kinematic { 1 } else { 0 },
+                        #[cfg(feature = "dim3")]
                         _pad0: [0; 2],
                         data,
                         local_mprops: mp,
@@ -262,7 +270,7 @@ impl GpuMultibodySet {
                     assembly_counter += link_ndofs;
 
                     let mut ws = make_workspace_init();
-                    ws.coords = link.joint.coords();
+                    ws.coords = link.joint.coords().into();
                     ws.joint_rot = link.joint.joint_rot();
                     if let Some(rb) = bodies.get(link.rigid_body_handle()) {
                         ws.gravity_scale = rb.gravity_scale();
@@ -277,7 +285,14 @@ impl GpuMultibodySet {
                         let pos = rb.position();
                         ws.coords[0] = pos.translation.x;
                         ws.coords[1] = pos.translation.y;
-                        ws.coords[2] = pos.translation.z;
+                        #[cfg(feature = "dim3")]
+                        {
+                            ws.coords[2] = pos.translation.z;
+                        }
+                        #[cfg(feature = "dim2")]
+                        {
+                            ws.coords[2] = pos.rotation.angle();
+                        }
                         ws.joint_rot = pos.rotation;
                     }
 
@@ -299,9 +314,9 @@ impl GpuMultibodySet {
                     // zero acceleration).
                     let locked = link.joint().data.locked_axes.bits() as u32;
                     let is_kin = link.joint().kinematic;
-                    let mut free_axis_of_dof = [0usize; 6];
+                    let mut free_axis_of_dof = [0usize; SPATIAL_DIM];
                     let mut nfree = 0usize;
-                    for ax in 0..6usize {
+                    for ax in 0..SPATIAL_DIM {
                         if (locked >> ax) & 1 == 0 {
                             free_axis_of_dof[nfree] = ax;
                             nfree += 1;
@@ -340,10 +355,10 @@ impl GpuMultibodySet {
 
                 first_link += num_links;
                 first_dof += ndofs;
-                jac_off += num_links * 6 * ndofs;
+                jac_off += num_links * SPATIAL_DIM as u32 * ndofs;
                 mm_off += ndofs * ndofs;
-                cor_off += num_links * 3 * ndofs;
-                icdt_off += 6 * ndofs;
+                cor_off += num_links * crate::math::DIM as u32 * ndofs;
+                icdt_off += SPATIAL_DIM as u32 * ndofs;
                 cons_off += max_constraints;
                 coupling_off += num_couplings;
             }

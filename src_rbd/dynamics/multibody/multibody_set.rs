@@ -2,6 +2,8 @@
 //! runtime-mutation entry points (motors, dt, softness).
 
 use crate::math::Pose;
+use crate::rapier::prelude::JointAxis;
+use crate::shaders::dynamics::SPATIAL_DIM;
 use crate::shaders::dynamics::{
     ConstraintSoftness, LocalMassProperties, MbDelayStateParams, MbDelayTickParams, MbDofCoupling,
     MbImpulseJointBuilder, MbImpulseJointConstraint, MultibodyContactConstraint, MultibodyInfo,
@@ -11,7 +13,6 @@ use crate::shaders::utils::BatchIndices;
 use khal::BufferUsages;
 use khal::Shader;
 use khal::backend::{Backend, GpuBackend, GpuBackendError};
-use rapier3d::prelude::JointAxis;
 use vortx::tensor::Tensor;
 
 /// Workgroup width for the parallelised LU decompose / solve kernels. Must
@@ -127,7 +128,7 @@ pub struct GpuMultibodySet {
     pub(super) dof_state: Tensor<f32>,
     /// Generalized forces / after solve, generalized accelerations.
     pub(super) gen_forces: Tensor<f32>,
-    /// Per-link `6 × ndofs` column-major jacobians.
+    /// Per-link `SPATIAL_DIM × ndofs` column-major jacobians.
     pub(super) body_jacobians: Tensor<f32>,
     /// Per-multibody `ndofs × ndofs` mass matrices (also used as LU work buffer).
     pub(super) mass_matrices: Tensor<f32>,
@@ -428,7 +429,7 @@ impl GpuMultibodySet {
     ///
     /// `link_id` is the global link id within the batch (it matches the body
     /// index given to [`from_rapier`](Self::from_rapier)) and `axis` indexes the
-    /// 6-DoF spatial layout (`0..DIM` linear, `DIM..` angular). Motors are baked
+    /// Spatial layout (`0..DIM` linear, `DIM..` angular). Motors are baked
     /// into the GPU state at finalization, so per-step actuation has to come
     /// through here.
     pub fn set_motor(
@@ -439,7 +440,7 @@ impl GpuMultibodySet {
         axis: usize,
         motor: JointMotor,
     ) -> Result<(), GpuBackendError> {
-        if axis >= 6 {
+        if axis >= SPATIAL_DIM {
             return Ok(());
         }
         let global_idx = (link_id * self.num_batches + batch) as usize;
@@ -465,7 +466,7 @@ impl GpuMultibodySet {
     /// as last uploaded. Use it to adjust one field of a live motor without
     /// rebuilding the rest.
     pub fn motor(&self, batch: u32, link_id: u32, axis: usize) -> Option<JointMotor> {
-        if axis >= 6 {
+        if axis >= SPATIAL_DIM {
             return None;
         }
         let global_idx = (link_id * self.num_batches + batch) as usize;
@@ -488,7 +489,7 @@ impl GpuMultibodySet {
     ) -> Result<(), GpuBackendError> {
         let mut touched: Vec<usize> = Vec::with_capacity(updates.len());
         for &(link_id, axis, motor) in updates {
-            if axis >= 6 {
+            if axis >= SPATIAL_DIM {
                 continue;
             }
             let global_idx = (link_id * self.num_batches + batch) as usize;
@@ -674,7 +675,7 @@ impl GpuMultibodySet {
         let mut offset = 0usize;
         for mb in set.multibodies() {
             // Mirror `from_rapier`'s fixed-root handling: a non-dynamic root has
-            // all 6 DOFs locked on the GPU even though rapier models it as free.
+            // all spatial DOFs locked even though rapier models it as free.
             let root_is_dynamic = mb
                 .link(0)
                 .and_then(|r| bodies.get(r.rigid_body_handle()))
@@ -687,12 +688,12 @@ impl GpuMultibodySet {
                 };
                 let mut data = convert_generic_joint(link.joint().data);
                 if link_idx == 0 && !root_is_dynamic {
-                    data.locked_axes = 0x3f;
+                    data.locked_axes = (1 << SPATIAL_DIM) - 1;
                 }
                 // Motor `impulse` is solver state, not configuration: keep the
                 // accumulated values so retargeting does not drop the servos'
                 // warmstart (mirrors `set_motors`).
-                for axis in 0..6 {
+                for axis in 0..SPATIAL_DIM {
                     data.motors[axis].impulse = entry.data.motors[axis].impulse;
                 }
                 entry.data = data;
@@ -1184,9 +1185,9 @@ impl GpuMultibodySet {
         let a = WsAddr::new(0, self.num_batches, batch_id);
         let mut out = Vec::new();
         for k in 0..self.links_per_batch {
-            let stat = &self.links_static_mirror[(batch_id * self.links_per_batch + k) as usize];
+            let stat = &self.links_static_mirror[(k * self.num_batches + batch_id) as usize];
             let locked = stat.data.locked_axes;
-            for axis in 0..6u32 {
+            for axis in 0..SPATIAL_DIM as u32 {
                 if locked & (1 << axis) == 0 {
                     out.push(ws_coord(&ws, a, k, axis));
                 }
@@ -1210,13 +1211,19 @@ pub(super) fn convert_link_mprops(
     m: &crate::rapier::prelude::MassProperties,
 ) -> LocalMassProperties {
     LocalMassProperties {
+        #[cfg(feature = "dim3")]
         inertia_ref_frame: m.principal_inertia_local_frame,
+        #[cfg(feature = "dim3")]
         inv_principal_inertia: m.inv_principal_inertia,
+        #[cfg(feature = "dim3")]
         padding0: 0,
-        inv_mass: glamx::Vec3::splat(m.inv_mass),
+        inv_mass: crate::math::Vector::splat(m.inv_mass),
+        #[cfg(feature = "dim3")]
         padding1: 0,
         com: m.local_com,
         locked_axes: 0,
+        #[cfg(feature = "dim2")]
+        inv_inertia: m.inv_principal_inertia,
     }
 }
 
@@ -1250,7 +1257,7 @@ pub(super) fn convert_generic_joint(j: crate::rapier::dynamics::GenericJoint) ->
 
 pub(super) fn make_workspace_init() -> MultibodyLinkWorkspace {
     let mut w: MultibodyLinkWorkspace = bytemuck::Zeroable::zeroed();
-    w.joint_rot = glamx::Quat::IDENTITY;
+    w.joint_rot = crate::math::Rotation::IDENTITY;
     w.gravity_scale = 1.0;
     w.local_to_parent = Pose::default();
     w.local_to_world = Pose::default();

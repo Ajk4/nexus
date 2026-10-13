@@ -96,7 +96,12 @@ impl GpuMultibodySet {
                         let mb = mb_set.multibodies().nth(mb_idx as usize).unwrap();
                         (SIDE_KIND_MB, mb_idx, link_idx, mb.ndofs() as u32)
                     }
-                    (None, Some(rb)) if rb.is_dynamic() => (SIDE_KIND_BODY, local1, 0, 6),
+                    (None, Some(rb)) if rb.is_dynamic() => (
+                        SIDE_KIND_BODY,
+                        local1,
+                        0,
+                        crate::shaders::dynamics::SPATIAL_DIM as u32,
+                    ),
                     _ => (SIDE_KIND_FIXED, u32::MAX, 0, 0),
                 };
 
@@ -105,7 +110,12 @@ impl GpuMultibodySet {
                         let mb = mb_set.multibodies().nth(mb_idx as usize).unwrap();
                         (SIDE_KIND_MB, mb_idx, link_idx, mb.ndofs() as u32)
                     }
-                    (None, Some(rb)) if rb.is_dynamic() => (SIDE_KIND_BODY, local2, 0, 6),
+                    (None, Some(rb)) if rb.is_dynamic() => (
+                        SIDE_KIND_BODY,
+                        local2,
+                        0,
+                        crate::shaders::dynamics::SPATIAL_DIM as u32,
+                    ),
                     _ => (SIDE_KIND_FIXED, u32::MAX, 0, 0),
                 };
 
