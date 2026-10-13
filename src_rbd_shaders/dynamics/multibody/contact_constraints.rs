@@ -1006,7 +1006,10 @@ pub fn gpu_mb_finalize_contact_constraints(
             tree_scratch,
             cons_base + s as usize,
             batch_ids.mb_contact_constraints_capacity as usize,
-            [u32::MAX; 2],
+            [
+                cons.link_id,
+                if is_self { cons.link_id_b } else { u32::MAX },
+            ],
         );
         // 3b) Kinematic dofs are user-driven: the impulse must not move them.
         zero_kinematic_dofs(contact_jac_cols, col_offset, &stat_slice, mb.num_links);
