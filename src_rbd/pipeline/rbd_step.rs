@@ -17,6 +17,35 @@ use khal::BufferUsages;
 use khal::backend::{Backend, Encoder, GpuBackend, GpuBackendError, GpuTimestamps};
 use vortx::tensor::Tensor;
 
+/// Pending creations in reserved polyline collider slots. Retire a collider only
+/// when it has no live contacts or joints. Slots must have independent storage,
+/// the same vertex count as these requests, and unchanged segment connectivity.
+pub struct PolylineCreations {
+    /// Destination collider index + 1; zero is idle. Consumed by the constructor.
+    pub requests: Tensor<u32>,
+    /// Consecutive local vertices for each request, with equal counts per request.
+    pub points: Tensor<crate::shaders::PaddedVector>,
+    /// Collision radius of each requested polyline.
+    pub radii: Tensor<f32>,
+}
+
+impl PolylineCreations {
+    /// Allocates request storage; collider slots are reserved when creating the world.
+    pub fn new(backend: &GpuBackend, count: usize, vertices_per_polyline: usize, radius: f32) -> Self {
+        let usage = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
+        Self {
+            requests: Tensor::vector(backend, &vec![0; count], usage).unwrap(),
+            points: Tensor::vector(backend, &vec![crate::shaders::PaddedVector::default(); count * vertices_per_polyline], usage).unwrap(),
+            radii: Tensor::vector(backend, &vec![radius; count], usage).unwrap(),
+        }
+    }
+}
+
+#[derive(Shader)]
+struct PolylineFactory {
+    create: crate::shaders::shapes::GpuCreatePolylines,
+}
+
 /// The main GPU physics pipeline coordinating all simulation stages.
 pub struct RbdPipeline {
     mprops_update: GpuMpropsUpdate,
@@ -30,6 +59,7 @@ pub struct RbdPipeline {
     lbvh: Lbvh,
     coloring: GpuColoring,
     warmstart: GpuWarmstart,
+    polyline_factory: PolylineFactory,
     /// Optional (default `false`): merge each collider pair's manifolds
     /// (e.g. per-triangle trimesh contacts) into one before the solvers.
     pub contact_reduction: bool,
@@ -54,8 +84,21 @@ impl RbdPipeline {
             lbvh: Lbvh::from_backend(backend),
             coloring: GpuColoring::from_backend(backend)?,
             warmstart: GpuWarmstart::from_backend(backend)?,
+            polyline_factory: PolylineFactory::from_backend(backend)?,
             contact_reduction: false,
         })
+    }
+
+    /// Constructs requested polylines before collision detection, consuming requests.
+    /// Existing, unrequested colliders are untouched.
+    pub fn create_polylines(
+        &self, state: &mut RbdState, creations: &mut PolylineCreations,
+        encoder: &mut <GpuBackend as Backend>::Encoder,
+    ) -> Result<(), GpuBackendError> {
+        let mut pass = encoder.begin_pass("[RBD] create-polylines", None);
+        self.polyline_factory.create.call(&mut pass, creations.requests.len() as u32,
+            &mut creations.requests, &creations.points, &creations.radii,
+            &mut state.shapes, &mut state.vertex_buffers, &state.index_buffers)
     }
 
     /// Executes one physics simulation timestep on the GPU.
@@ -740,15 +783,16 @@ impl RbdPipeline {
             // never below the configured per-batch floor × num_batches.
             if resize_pairs {
                 state.collision_pairs = Tensor::vector_uninit(backend, new_total, storage)?;
-                state.pfm_pairs = Tensor::vector_uninit(backend, new_total, storage)?;
-                state.pfm_sort.resize(backend, new_total);
+                let new_pfm = new_total * state.capacities.subshape_pairs_per_collision;
+                state.pfm_pairs = Tensor::vector_uninit(backend, new_pfm, storage)?;
+                state.pfm_sort.resize(backend, new_pfm);
                 state.collision_pairs_capacity_cpu = new_total;
 
                 // Contacts-keyed buffers follow the pair capacity: contact
                 // slots are positional (pair `t` owns slot `t`, PFM entry `i`
                 // owns slot `pairs_total + i`), so their capacity is always
-                // `2 ×` the pair/PFM capacity.
-                let new_contacts = new_total * 2;
+                // the sum of pair and PFM capacities.
+                let new_contacts = new_total + new_pfm;
                 state.contacts = Tensor::vector_uninit(backend, new_contacts, storage)?;
                 #[cfg(feature = "dim3")]
                 {

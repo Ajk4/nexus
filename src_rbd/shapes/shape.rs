@@ -6,9 +6,52 @@
 //! external vertex data held in [`ShapeBuffers`] rather than storing it inline.
 
 use crate::math::Point;
+use crate::parry::bounding_volume::BoundingVolume;
 use crate::parry::shape::{Shape as ParryShape, TypedShape};
 use crate::shaders::PaddedVector;
 use crate::shaders::shapes::Shape;
+
+#[cfg(all(test, feature = "dim2"))]
+mod tests {
+    use super::*;
+    use crate::shaders::{Vector, shapes::gpu_create_polylines};
+
+    #[test]
+    fn created_polyline_bvh_covers_segments_and_collision_radius() {
+        let mut buffers = ShapeBuffers::default();
+        let template = crate::parry::shape::Polyline::new(
+            (0..9).map(|i| Vector::new(i as f32, 0.)).collect(), None);
+        let mut shapes = vec![shape_from_parry(&template, &mut buffers).unwrap()];
+        let points: Vec<_> = (0..9).map(|i| PaddedVector::new(Vector::new(
+            i as f32 - 4., (i as f32 * 1.2).sin() * 3.))).collect();
+        gpu_create_polylines(glamx::UVec3::ZERO, &mut [1], &points, &[0.35],
+            &mut shapes, &mut buffers.vertices, &buffers.indices);
+        let polyline = shapes[0].to_polyline();
+        for pair in points.windows(2) {
+            let midpoint = (*pair[0] + *pair[1]) * 0.5;
+            let mut node_id = 0;
+            let mut found = false;
+            while node_id < polyline.bvh_node_len {
+                let node = polyline.bvh_node_idx(node_id, &buffers.indices);
+                let bounds = polyline.bvh_node_aabb(node_id, &buffers.vertices);
+                if midpoint.cmpge(bounds.mins).all() && midpoint.cmple(bounds.maxs).all() {
+                    if node.entry_index == u32::MAX {
+                        let segment = polyline.segment(node.shape_index, &buffers.vertices, &buffers.indices);
+                        found |= (segment.a - *pair[0]).length() < 1e-6
+                            && (segment.b - *pair[1]).length() < 1e-6;
+                        node_id = node.exit_index;
+                    } else { node_id = node.entry_index; }
+                } else { node_id = node.exit_index; }
+            }
+            assert!(found, "BVH query missed segment at {midpoint:?}");
+        }
+        let bounds = polyline.aabb();
+        for point in points {
+            assert!((*point - Vector::splat(0.35)).cmpge(bounds.mins).all());
+            assert!((*point + Vector::splat(0.35)).cmple(bounds.maxs).all());
+        }
+    }
+}
 
 /// Auxiliary buffers for complex shape types like polylines and triangle meshes.
 ///
@@ -67,7 +110,7 @@ pub fn shape_from_parry(
             let mut objects: Vec<_> = shape
                 .segments()
                 .map(|seg| {
-                    let aabb = seg.local_aabb();
+                    let aabb = seg.local_aabb().loosened(crate::shaders::shapes::DEFAULT_POLYLINE_RADIUS);
                     BvhObject {
                         aabb: bvh::aabb::AABB::with_bounds(
                             parry_to_bvh_point(aabb.mins),

@@ -60,6 +60,8 @@ pub struct RbdCapacities {
     ///
     /// This may or may not be automatically resized depending on [`Self::collisions_resize_policy`].
     pub collisions_capacity: u32,
+    /// Deferred segment/triangle tests reserved per collision-pair slot.
+    pub subshape_pairs_per_collision: u32,
     /// Maximum number of multibody contact-constraint slots reserved per batch
     /// (each contact point involving a multibody costs one normal slot plus
     /// `DIM - 1` friction slots). Resized according to
@@ -96,6 +98,7 @@ impl Default for RbdCapacities {
             batches: 1,
             body_capacity: 65536,
             collisions_capacity: 4096,
+            subshape_pairs_per_collision: 1,
             mb_contact_constraints_capacity: 256,
             collisions_resize_policy: RbdResizePolicy::Grow,
             solver_colors: 8,
@@ -539,6 +542,12 @@ impl RbdState {
     pub fn shapes_mut(&mut self) -> &mut Tensor<Shape> {
         &mut self.shapes
     }
+
+    /// Requested deferred narrow-phase work, before capacity clamping.
+    pub fn narrow_phase_pairs_len(&self) -> &Tensor<u32> { &self.pfm_pairs_len }
+
+    /// Allocated deferred narrow-phase entries.
+    pub fn narrow_phase_pairs_capacity(&self) -> u32 { self.pfm_pairs.capacity() as u32 }
 
     /// Per-collider parent rigid-body slot map (env-local). For debugging.
     pub fn collider_parent(&self) -> &Tensor<u32> {

@@ -14,6 +14,8 @@
 //! - Polyline
 
 mod capsule;
+mod create_polyline;
+pub use create_polyline::*;
 #[cfg(feature = "dim3")]
 mod cone;
 mod convex_polyhedron;

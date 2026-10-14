@@ -717,7 +717,7 @@ fn polyline_convex(
     }
 
     // Get the convex shape's AABB in the polyline's local space, and enlarge with the prediction distance.
-    let thickness = 0.4; // TODO: make thickness configurable or part of the polyline struct
+    let thickness = mesh.radius;
     let mut test_aabb = convex.compute_aabb(pose12, vertices);
     test_aabb.mins -= Vector::splat(prediction + thickness);
     test_aabb.maxs += Vector::splat(prediction + thickness);
@@ -740,6 +740,11 @@ fn polyline_convex(
             // This is a leaf.
             let seg = mesh.segment(idx.shape_index, vertices, indices);
             // The segment is seen as a capsule with the given thickness.
+            let segment_aabb = crate::bounding_volumes::Aabb::new(seg.a.min(seg.b), seg.a.max(seg.b));
+            if !test_aabb.intersects(&segment_aabb) {
+                curr = idx.exit_index;
+                continue;
+            }
             let capsule = Capsule::new(seg, thickness);
             let capsule_shape = Shape::from_capsule(&capsule);
             let sub1 = capsule_shape.pfm_subshape();

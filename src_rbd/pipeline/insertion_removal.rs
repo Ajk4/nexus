@@ -130,8 +130,9 @@ impl RbdState {
         let pairs_capacity = collisions_capacity * num_batches;
         // Positional contact slots: pair `t` owns slot `t`, PFM entry `i` owns
         // slot `pairs_total + i`, so the contacts buffer (and every
-        // contacts-keyed buffer) is sized `pairs + pfm = 2 ×` the pair capacity.
-        let contacts_capacity = pairs_capacity * 2;
+        // contacts-keyed buffer) is sized `pairs + pfm`.
+        let pfm_capacity = pairs_capacity * capacities.subshape_pairs_per_collision;
+        let contacts_capacity = pairs_capacity + pfm_capacity;
         let collision_pairs = Tensor::vector_uninit(backend, pairs_capacity, storage).unwrap();
         // Single global pair counter.
         let collision_pairs_len = Tensor::vector(
@@ -157,8 +158,8 @@ impl RbdState {
             Tensor::scalar_uninit(backend, BufferUsages::STORAGE | BufferUsages::INDIRECT).unwrap();
         let pfm_pairs_indirect =
             Tensor::scalar_uninit(backend, BufferUsages::STORAGE | BufferUsages::INDIRECT).unwrap();
-        let pfm_pairs = Tensor::vector_uninit(backend, pairs_capacity, storage).unwrap();
-        let pfm_sort = PfmSortState::new(backend, pairs_capacity);
+        let pfm_pairs = Tensor::vector_uninit(backend, pfm_capacity, storage).unwrap();
+        let pfm_sort = PfmSortState::new(backend, pfm_capacity);
         // Single global PFM work-list counter.
         let pfm_pairs_len = Tensor::vector(
             backend,

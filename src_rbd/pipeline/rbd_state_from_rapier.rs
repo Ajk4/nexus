@@ -677,9 +677,10 @@ impl RbdState {
 
         // Positional contact slots: pair `t` owns slot `t`, PFM entry `i` owns
         // slot `pairs_total + i`, so the contacts buffer (and every
-        // contacts-keyed buffer) is sized `pairs + pfm = 2 ×` the pair capacity.
+        // contacts-keyed buffer) is sized `pairs + pfm`.
         let pairs_capacity = capacities.collisions_capacity * num_batches;
-        let contacts_capacity = pairs_capacity * 2;
+        let pfm_capacity = pairs_capacity * capacities.subshape_pairs_per_collision;
+        let contacts_capacity = pairs_capacity + pfm_capacity;
         let contacts = Tensor::vector_uninit(backend, contacts_capacity, storage).unwrap();
         #[cfg(feature = "dim3")]
         let mb_contact_index = Tensor::vector_uninit(backend, contacts_capacity, storage).unwrap();
@@ -691,7 +692,7 @@ impl RbdState {
             Tensor::scalar_uninit(backend, BufferUsages::STORAGE | BufferUsages::INDIRECT).unwrap();
         let pfm_pairs = Tensor::vector_uninit(
             backend,
-            capacities.collisions_capacity * num_batches,
+            pfm_capacity,
             storage,
         )
         .unwrap();
@@ -727,7 +728,7 @@ impl RbdState {
             storage | BufferUsages::UNIFORM,
         )
         .unwrap();
-        let pfm_sort = PfmSortState::new(backend, pairs_capacity);
+        let pfm_sort = PfmSortState::new(backend, pfm_capacity);
         let color_sorted_ids = Tensor::vector_uninit(backend, contacts_capacity, storage).unwrap();
         // Zeroed (not uninit): the first frame's warmstart transfer walks the
         // "old" counts before any step has written them; zero counts = empty

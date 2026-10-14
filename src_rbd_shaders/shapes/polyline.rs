@@ -20,6 +20,7 @@ pub struct Polyline {
     pub bvh_node_len: u32,
     /// Root AABB of the polyline.
     pub root_aabb: Aabb,
+    pub radius: f32,
 }
 
 /// BVH node indices for tree traversal.
@@ -42,18 +43,20 @@ impl Polyline {
         bvh_idx_root_id: u32,
         bvh_node_len: u32,
         root_aabb: Aabb,
+        radius: f32,
     ) -> Self {
         Self {
             bvh_vtx_root_id,
             bvh_idx_root_id,
             bvh_node_len,
             root_aabb,
+            radius,
         }
     }
 
     /// Computes the AABB of a polyline.
     pub fn aabb(&self) -> Aabb {
-        self.root_aabb
+        self.root_aabb.loosened(self.radius)
     }
 
     /// Gets the AABB of a BVH node.
