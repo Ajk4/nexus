@@ -381,6 +381,17 @@ impl RbdState {
         &mut self.vels
     }
 
+    /// Body-local mass properties, in the same slot order as body poses.
+    pub fn local_mass_properties(&self) -> &Tensor<GpuLocalMassProperties> {
+        &self.local_mprops
+    }
+
+    /// Update mass and inertia between steps, for example after resizing a shape.
+    /// World-space mass properties are recomputed at the start of the next step.
+    pub fn local_mass_properties_mut(&mut self) -> &mut Tensor<GpuLocalMassProperties> {
+        &mut self.local_mprops
+    }
+
     /// Discards previous-frame contact warmstarts after teleporting bodies.
     /// This does not change any body poses, velocities, or joint configuration.
     pub fn clear_contact_history(&mut self, backend: &GpuBackend) -> Result<(), GpuBackendError> {
