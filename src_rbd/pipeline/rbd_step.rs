@@ -17,11 +17,6 @@ use khal::BufferUsages;
 use khal::backend::{Backend, Encoder, GpuBackend, GpuBackendError, GpuTimestamps};
 use vortx::tensor::Tensor;
 
-#[derive(Shader)]
-struct GpuPolylineRefit {
-    refit: crate::shaders::shapes::GpuRefitPolylines,
-}
-
 /// The main GPU physics pipeline coordinating all simulation stages.
 pub struct RbdPipeline {
     mprops_update: GpuMpropsUpdate,
@@ -35,7 +30,6 @@ pub struct RbdPipeline {
     lbvh: Lbvh,
     coloring: GpuColoring,
     warmstart: GpuWarmstart,
-    refit_polylines: GpuPolylineRefit,
     /// Optional (default `false`): merge each collider pair's manifolds
     /// (e.g. per-triangle trimesh contacts) into one before the solvers.
     pub contact_reduction: bool,
@@ -60,21 +54,8 @@ impl RbdPipeline {
             lbvh: Lbvh::from_backend(backend),
             coloring: GpuColoring::from_backend(backend)?,
             warmstart: GpuWarmstart::from_backend(backend)?,
-            refit_polylines: GpuPolylineRefit::from_backend(backend)?,
             contact_reduction: false,
         })
-    }
-
-    /// Records a BVH refit after in-place polyline vertex edits, without reallocating storage.
-    /// Call before collision detection. Each polyline must own its vertex/BVH range.
-    pub fn refit_polylines(
-        &self,
-        state: &mut RbdState,
-        encoder: &mut <GpuBackend as Backend>::Encoder,
-    ) -> Result<(), GpuBackendError> {
-        let mut pass = encoder.begin_pass("[RBD] refit-polylines", None);
-        self.refit_polylines.refit.call(&mut pass, state.shapes.len() as u32,
-            &mut state.shapes, &mut state.vertex_buffers, &state.index_buffers)
     }
 
     /// Executes one physics simulation timestep on the GPU.

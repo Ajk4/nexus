@@ -37,7 +37,6 @@ pub const SHAPE_TYPE_CONVEX_POLY: u32 = 7;
 // TODO: since this shape type is only for trimesh, it doesn't implement all the
 //       operations it could if it were a standalone self.
 pub const SHAPE_TYPE_TRIANGLE: u32 = 8;
-pub const DEFAULT_POLYLINE_RADIUS: f32 = 0.4;
 
 /// A generic shape that can represent any concrete shape type.
 ///
@@ -287,7 +286,7 @@ impl Shape {
             Vector::new(self.b.x, self.b.y, self.b.z),
             Vector::new(self.c.x, self.c.y, self.c.z),
         );
-        Polyline::new(bvh_vtx_root_id, bvh_idx_root_id, bvh_node_len, root_aabb, self.b.w)
+        Polyline::new(bvh_vtx_root_id, bvh_idx_root_id, bvh_node_len, root_aabb)
     }
 
     /*
@@ -709,21 +708,15 @@ impl Shape {
         #[cfg(feature = "dim2")]
         return Self {
             a: Vec4::new(a0, a1, a2, tag),
-            b: Vec4::new(aabb_mins.x, aabb_mins.y, 0.0, DEFAULT_POLYLINE_RADIUS),
+            b: Vec4::new(aabb_mins.x, aabb_mins.y, 0.0, 0.0),
             c: Vec4::new(aabb_maxs.x, aabb_maxs.y, 0.0, 0.0),
         };
         #[cfg(feature = "dim3")]
         return Self {
             a: Vec4::new(a0, a1, a2, tag),
-            b: Vec4::new(aabb_mins.x, aabb_mins.y, aabb_mins.z, DEFAULT_POLYLINE_RADIUS),
+            b: Vec4::new(aabb_mins.x, aabb_mins.y, aabb_mins.z, 0.0),
             c: Vec4::new(aabb_maxs.x, aabb_maxs.y, aabb_maxs.z, 0.0),
         };
-    }
-
-    /// Sets the capsule radius of a polyline. Defaults to 0.4 when constructed.
-    pub fn with_polyline_radius(mut self, radius: f32) -> Self {
-        self.b.w = radius;
-        self
     }
 
     /// Creates a triangle mesh shape from BVH data.

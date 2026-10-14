@@ -6,48 +6,9 @@
 //! external vertex data held in [`ShapeBuffers`] rather than storing it inline.
 
 use crate::math::Point;
-use crate::parry::bounding_volume::BoundingVolume;
 use crate::parry::shape::{Shape as ParryShape, TypedShape};
 use crate::shaders::PaddedVector;
-use crate::shaders::shapes::{Shape, DEFAULT_POLYLINE_RADIUS};
-
-#[cfg(all(test, feature = "dim2", feature = "cpu"))]
-mod tests {
-    use super::*;
-    use crate::math::{Pose, Vec2};
-    use crate::shaders::glamx::UVec3;
-    use crate::shaders::shapes::gpu_refit_polylines;
-
-    #[test]
-    fn refitted_polyline_bounds_follow_edited_vertices_and_radius() {
-        let polyline = crate::parry::shape::Polyline::new(
-            (0..5).map(|x| Vec2::new(x as f32, 0.)).collect(), None);
-        let mut buffers = ShapeBuffers::default();
-        let mut shape = shape_from_parry(&polyline, &mut buffers).unwrap().with_polyline_radius(0.2);
-        let first = shape.polyline_vertex_start() as usize;
-        for (i, point) in buffers.vertices[first..].iter_mut().enumerate() {
-            *point = PaddedVector::new(Vec2::new(i as f32, 2. + 0.5 * i as f32));
-        }
-        gpu_refit_polylines(UVec3::ZERO, core::slice::from_mut(&mut shape), &mut buffers.vertices, &buffers.indices);
-        let bounds = shape.compute_aabb(Pose::IDENTITY, &buffers.vertices);
-        assert!(bounds.mins.distance(Vec2::new(-0.2, 1.8)) < 1e-5);
-        assert!(bounds.maxs.distance(Vec2::new(4.2, 4.2)) < 1e-5);
-        let polyline = shape.to_polyline();
-        for index in 0..polyline.bvh_node_len {
-            let node = polyline.bvh_node_idx(index, &buffers.indices);
-            let bounds = polyline.bvh_node_aabb(index, &buffers.vertices);
-            let start = if node.entry_index == u32::MAX { index } else { node.entry_index };
-            for child in start..node.exit_index {
-                let leaf = polyline.bvh_node_idx(child, &buffers.indices);
-                if leaf.entry_index != u32::MAX { continue; }
-                let segment = polyline.segment(leaf.shape_index, &buffers.vertices, &buffers.indices);
-                for point in [segment.a, segment.b] {
-                    assert!(point.cmpge(bounds.mins).all() && point.cmple(bounds.maxs).all());
-                }
-            }
-        }
-    }
-}
+use crate::shaders::shapes::Shape;
 
 /// Auxiliary buffers for complex shape types like polylines and triangle meshes.
 ///
@@ -106,8 +67,7 @@ pub fn shape_from_parry(
             let mut objects: Vec<_> = shape
                 .segments()
                 .map(|seg| {
-                    // Bound the swept segment so collinear polylines have nonzero SAH area.
-                    let aabb = seg.local_aabb().loosened(DEFAULT_POLYLINE_RADIUS);
+                    let aabb = seg.local_aabb();
                     BvhObject {
                         aabb: bvh::aabb::AABB::with_bounds(
                             parry_to_bvh_point(aabb.mins),

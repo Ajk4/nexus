@@ -20,7 +20,6 @@ mod convex_polyhedron;
 #[cfg(feature = "dim3")]
 mod cylinder;
 mod polyline;
-mod refit;
 mod segment;
 mod shape;
 #[cfg(feature = "dim3")]
@@ -38,7 +37,6 @@ pub use convex_polyhedron::ConvexPolyhedron;
 #[cfg(feature = "dim3")]
 pub use cylinder::Cylinder;
 pub use polyline::Polyline;
-pub use refit::*;
 pub use segment::Segment;
 pub use shape::*;
 #[cfg(feature = "dim3")]
