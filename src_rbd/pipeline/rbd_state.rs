@@ -540,6 +540,26 @@ impl RbdState {
         &mut self.shapes
     }
 
+    /// Shared shape vertices and BVH bounds. Refit polylines after changing vertices.
+    pub fn shape_vertices_mut(&mut self) -> &mut Tensor<PaddedVector> {
+        &mut self.vertex_buffers
+    }
+
+    /// Shared shape vertices and BVH bounds.
+    pub fn shape_vertices(&self) -> &Tensor<PaddedVector> {
+        &self.vertex_buffers
+    }
+
+    /// Number of deferred narrow-phase entries requested by the last step.
+    pub fn narrow_phase_pairs_len(&self) -> &Tensor<u32> {
+        &self.pfm_pairs_len
+    }
+
+    /// Capacity of the deferred narrow-phase work list.
+    pub fn narrow_phase_pairs_capacity(&self) -> u32 {
+        self.pfm_pairs.capacity() as u32
+    }
+
     /// Per-collider parent rigid-body slot map (env-local). For debugging.
     pub fn collider_parent(&self) -> &Tensor<u32> {
         &self.collider_parent
