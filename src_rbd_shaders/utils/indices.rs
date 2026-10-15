@@ -20,13 +20,13 @@ pub struct BatchIndices {
     pub colliders_len: u32,
     /// Number of *active* rigid bodies per batch.
     pub bodies_len: u32,
-    /// Total capacity of the flat collision-pair buffer (all batches share it;
-    /// also the capacity of the flat PFM work-list, which is sized identically).
+    /// Total capacity of the flat collision-pair buffer (all batches share it).
     pub collision_pairs_capacity: u32,
     /// Total capacity of the flat contacts buffer (and of every contacts-keyed
     /// buffer: constraints, builders, colors, sorted ids). Contact slots are
     /// positional (pair `t` owns slot `t`, PFM entry `i` owns slot
-    /// `pairs_total + i`), so this is always `2 * collision_pairs_capacity`.
+    /// `pairs_total + i`). The remaining capacity after reserving collision-pair
+    /// slots is the capacity of the PFM work-list.
     pub contacts_capacity: u32,
     /// Number of *active* free-body impulse joints per batch (the loop bound;
     /// the joint-keyed buffers are batch-interleaved).

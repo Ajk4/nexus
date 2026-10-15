@@ -15,6 +15,69 @@ use khal::backend::{GpuBackend, GpuBackendError, GpuPass};
 use khal::{BufferUsages, Shader};
 use vortx::tensor::Tensor;
 
+#[cfg(all(test, feature = "dim2", feature = "cpu"))]
+mod tests {
+    use super::*;
+    use crate::math::Vec2;
+    use crate::pipeline::{RbdCapacities, RbdPipeline, RbdResizePolicy, RbdState};
+    use crate::rapier::prelude::*;
+    use crate::shaders::dynamics::RbdSimParams;
+
+    #[test]
+    fn polyline_contacts_use_subshape_capacity() {
+        let backend = GpuBackend::Cpu;
+        let mut bodies = RigidBodySet::new();
+        let mut colliders = ColliderSet::new();
+        let wall = bodies.insert(RigidBodyBuilder::fixed());
+        colliders.insert_with_parent(
+            ColliderBuilder::polyline(
+                (-3..=3).map(|i| Vec2::new(i as f32 * 0.1, 0.)).collect(),
+                None,
+            ),
+            wall,
+            &mut bodies,
+        );
+        let body = bodies.insert(RigidBodyBuilder::dynamic().translation(Vec2::new(0., 0.04)));
+        colliders.insert_with_parent(ColliderBuilder::capsule_x(0.25, 0.05), body, &mut bodies);
+        bodies[body].recompute_mass_properties_from_colliders(&colliders);
+        let joints = ImpulseJointSet::new();
+        let multibodies = MultibodyJointSet::new();
+        let params = RbdSimParams::default();
+        let mut state = RbdState::from_rapier(
+            &backend,
+            &[(&bodies, &colliders, &joints, &multibodies, &params)],
+            RbdCapacities {
+                collisions_capacity: 1,
+                subshape_pairs_per_collision: 8,
+                collisions_resize_policy: RbdResizePolicy::Fixed,
+                solver_colors_resize_policy: RbdResizePolicy::Fixed,
+                ..Default::default()
+            },
+        );
+        state.set_gravity(&backend, [0.; 3]);
+        RbdPipeline::new(&backend)
+            .unwrap()
+            .step(&backend, &mut state, None)
+            .unwrap();
+        let contacts = state.contacts().buffer().unwrap_slice();
+        let bound = state.contact_plan().buffer().unwrap_slice()[0].bound as usize;
+        let mut left = false;
+        let mut right = false;
+        for manifold in &contacts[..bound] {
+            for point in &manifold.contact.points_a[..manifold.contact.len as usize] {
+                if point.dist <= 0. {
+                    left |= point.pt.x < -0.1;
+                    right |= point.pt.x > 0.1;
+                }
+            }
+        }
+        assert!(
+            left && right,
+            "capsule must contact both sides of the segmented wall"
+        );
+    }
+}
+
 /// Narrow-phase kernel bundle (see [`GpuNarrowPhase`]).
 #[derive(Shader)]
 struct GpuNarrowPhaseShaders {
@@ -51,8 +114,8 @@ impl GpuNarrowPhase {
 }
 
 /// Buffers backing the per-pair PFM sort of the contact-reduction path. All
-/// sized by the collision-pair capacity (the PFM list shares it); `resize`
-/// must be called whenever that capacity changes.
+/// sized by the PFM work-list capacity; `resize` must be called whenever that
+/// capacity changes.
 pub struct PfmSortState {
     /// Per-entry pair-index keys, written by `gpu_pfm_sort_keys`.
     keys: Tensor<u32>,

@@ -89,8 +89,9 @@ pub fn gpu_contact_plan(
 ) {
     let pairs =
         atomic_load_u32(collision_pairs_len.at_mut(0)).min(batch_ids.collision_pairs_capacity);
-    let pfm = atomic_load_u32(pfm_pairs_len.at_mut(0)).min(batch_ids.collision_pairs_capacity);
-    // `contacts_capacity = 2 * collision_pairs_capacity` (host invariant), so
+    let pfm_capacity = batch_ids.contacts_capacity - batch_ids.collision_pairs_capacity;
+    let pfm = atomic_load_u32(pfm_pairs_len.at_mut(0)).min(pfm_capacity);
+    // `contacts_capacity = collision_pairs_capacity + pfm_capacity`, so
     // the positional slots `[0, pairs)` and `[pairs, pairs + pfm)` always fit.
     let bound = pairs + pfm;
 
@@ -449,15 +450,12 @@ pub fn gpu_narrow_phase_shape_shape_deferred(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] pfm_pairs_len: &mut [u32],
     #[spirv(storage_buffer, descriptor_set = 1, binding = 0)] vertices: &[PaddedVector],
     #[spirv(storage_buffer, descriptor_set = 1, binding = 1)] indices: &[u32],
-    // NOTE: the flat PFM work-list shares the collision-pair buffer's capacity
-    //       (`collision_pairs_capacity`); both buffers are allocated the same
-    //       total size.
     #[spirv(uniform, descriptor_set = 0, binding = 6)] batch_ids: &BatchIndices,
     #[spirv(uniform, descriptor_set = 0, binding = 7)] params: &RbdSimParams,
 ) {
     let prediction = params.prediction_distance();
     let num_threads = num_workgroups.x * WORKGROUP_SIZE;
-    let pfm_capacity = batch_ids.collision_pairs_capacity as usize;
+    let pfm_capacity = (batch_ids.contacts_capacity - batch_ids.collision_pairs_capacity) as usize;
 
     let total =
         atomic_load_u32(collision_pairs_len.at_mut(0)).min(batch_ids.collision_pairs_capacity);
