@@ -19,7 +19,8 @@ use vortx::tensor::Tensor;
 
 /// Pending creations in reserved polyline collider slots. Retire a collider only
 /// when it has no live contacts or joints. Slots must have independent storage,
-/// the same vertex count as these requests, and unchanged segment connectivity.
+/// the same vertex capacity as these requests, and unchanged segment connectivity.
+/// Only the first `segment_counts` segments participate in collision detection.
 pub struct PolylineCreations {
     /// Destination collider index + 1; zero is idle. Consumed by the constructor.
     pub requests: Tensor<u32>,
@@ -27,6 +28,8 @@ pub struct PolylineCreations {
     pub points: Tensor<crate::shaders::PaddedVector>,
     /// Collision radius of each requested polyline.
     pub radii: Tensor<f32>,
+    /// Number of active segments, in original segment-index order, per request.
+    pub segment_counts: Tensor<u32>,
 }
 
 impl PolylineCreations {
@@ -37,6 +40,7 @@ impl PolylineCreations {
             requests: Tensor::vector(backend, &vec![0; count], usage).unwrap(),
             points: Tensor::vector(backend, &vec![crate::shaders::PaddedVector::default(); count * vertices_per_polyline], usage).unwrap(),
             radii: Tensor::vector(backend, &vec![radius; count], usage).unwrap(),
+            segment_counts: Tensor::vector(backend, &vec![(vertices_per_polyline - 1) as u32; count], usage).unwrap(),
         }
     }
 }
@@ -97,7 +101,7 @@ impl RbdPipeline {
     ) -> Result<(), GpuBackendError> {
         let mut pass = encoder.begin_pass("[RBD] create-polylines", None);
         self.polyline_factory.create.call(&mut pass, creations.requests.len() as u32,
-            &mut creations.requests, &creations.points, &creations.radii,
+            &mut creations.requests, &creations.points, &creations.radii, &creations.segment_counts,
             &mut state.shapes, &mut state.vertex_buffers, &state.index_buffers)
     }
 

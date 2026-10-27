@@ -738,7 +738,7 @@ fn polyline_convex(
             // This is a leaf.
             let seg = mesh.segment(idx.shape_index, vertices, indices);
             // The segment is seen as a capsule with the given thickness.
-            let segment_aabb = crate::bounding_volumes::Aabb::new(seg.a.min(seg.b), seg.a.max(seg.b));
+            let segment_aabb = mesh.bvh_node_aabb(curr, vertices);
             if !test_aabb.intersects(&segment_aabb) {
                 curr = idx.exit_index;
                 continue;

@@ -14,9 +14,10 @@ pub fn gpu_create_polylines(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] requests: &mut [u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] points: &[PaddedVector],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] radii: &[f32],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] shapes: &mut [Shape],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] vertices: &mut [PaddedVector],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] indices: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] segment_counts: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] shapes: &mut [Shape],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 5)] vertices: &mut [PaddedVector],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 6)] indices: &[u32],
 ) {
     let request = invocation_id.x as usize;
     if request >= requests.len() || requests.read(request) == 0 { return; }
@@ -28,12 +29,18 @@ pub fn gpu_create_polylines(
         vertices.write(first + i, PaddedVector::new(*points.read(request * count + i)));
     }
     let mut root = Aabb::new(Vector::splat(f32::MAX), Vector::splat(-f32::MAX));
+    let mut capacity = 0;
     for offset in 0..slot.bvh_node_len {
         let node_id = slot.bvh_node_len - 1 - offset;
         let node = slot.bvh_node_idx(node_id, indices);
         let bounds = if node.entry_index == u32::MAX {
-            let segment = slot.segment(node.shape_index, vertices, indices);
-            Aabb::new(segment.a.min(segment.b), segment.a.max(segment.b))
+            capacity += 1;
+            if node.shape_index < segment_counts.read(request) {
+                let segment = slot.segment(node.shape_index, vertices, indices);
+                Aabb::new(segment.a.min(segment.b), segment.a.max(segment.b))
+            } else {
+                Aabb::new(Vector::splat(f32::MAX), Vector::splat(-f32::MAX))
+            }
         } else {
             let left = node.entry_index;
             let right = slot.bvh_node_idx(left, indices).exit_index;
@@ -46,6 +53,11 @@ pub fn gpu_create_polylines(
         vertices.write(vertex, PaddedVector::new(bounds.mins));
         vertices.write(vertex + 1, PaddedVector::new(bounds.maxs));
         root = root.merged(&bounds);
+    }
+    assert!(segment_counts.read(request) <= capacity,
+        "active polyline segment count exceeds reserved capacity");
+    if segment_counts.read(request) == 0 {
+        root = Aabb::new(Vector::ZERO, Vector::ZERO);
     }
     shapes.write(id, Shape::polyline(slot.bvh_vtx_root_id, slot.bvh_idx_root_id,
         slot.bvh_node_len, root.mins, root.maxs).with_polyline_radius(radii.read(request)));

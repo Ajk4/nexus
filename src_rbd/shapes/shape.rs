@@ -17,6 +17,28 @@ mod tests {
     use crate::shaders::{Vector, shapes::gpu_create_polylines};
 
     #[test]
+    fn inactive_polyline_segments_do_not_expand_collision_bounds() {
+        let mut buffers = ShapeBuffers::default();
+        let template = crate::parry::shape::Polyline::new(
+            (0..5).map(|i| Vector::new(i as f32, 0.)).collect(), None);
+        let mut shapes = vec![shape_from_parry(&template, &mut buffers).unwrap()];
+        let points = [Vector::new(0., 0.), Vector::new(1., 0.), Vector::new(2., 0.),
+            Vector::new(100., 100.), Vector::new(200., 200.)].map(PaddedVector::new);
+        gpu_create_polylines(glamx::UVec3::ZERO, &mut [1], &points, &[0.35], &[2],
+            &mut shapes, &mut buffers.vertices, &buffers.indices);
+        let line = shapes[0].to_polyline();
+        assert!((line.aabb().maxs - Vector::new(2.35, 0.35)).length() < 1e-5);
+        for node_id in 0..line.bvh_node_len {
+            let node = line.bvh_node_idx(node_id, &buffers.indices);
+            if node.entry_index == u32::MAX && node.shape_index >= 2 {
+                let bounds = line.bvh_node_aabb(node_id, &buffers.vertices);
+                assert!(!bounds.intersects(&crate::shaders::bounding_volumes::Aabb::new(
+                    Vector::splat(-1000.), Vector::splat(1000.))));
+            }
+        }
+    }
+
+    #[test]
     fn created_polyline_bvh_covers_segments_and_collision_radius() {
         let mut buffers = ShapeBuffers::default();
         let template = crate::parry::shape::Polyline::new(
@@ -24,7 +46,7 @@ mod tests {
         let mut shapes = vec![shape_from_parry(&template, &mut buffers).unwrap()];
         let points: Vec<_> = (0..9).map(|i| PaddedVector::new(Vector::new(
             i as f32 - 4., (i as f32 * 1.2).sin() * 3.))).collect();
-        gpu_create_polylines(glamx::UVec3::ZERO, &mut [1], &points, &[0.35],
+        gpu_create_polylines(glamx::UVec3::ZERO, &mut [1], &points, &[0.35], &[8],
             &mut shapes, &mut buffers.vertices, &buffers.indices);
         let polyline = shapes[0].to_polyline();
         for pair in points.windows(2) {
@@ -126,7 +148,12 @@ pub fn shape_from_parry(
             buffers.vertices.extend(
                 flat_bvh
                     .iter()
-                    .flat_map(|n| [bvh_to_point(n.aabb.min), bvh_to_point(n.aabb.max)])
+                    .flat_map(|n| {
+                        let bounds = if n.entry_index == u32::MAX {
+                            objects[n.shape_index as usize].aabb
+                        } else { n.aabb };
+                        [bvh_to_point(bounds.min), bvh_to_point(bounds.max)]
+                    })
                     .map(PaddedVector::new),
             );
             let bvh_node_len = flat_bvh.len();
