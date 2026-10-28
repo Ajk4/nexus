@@ -7,3 +7,4 @@ mod gjk;
 #[cfg(feature = "dim3")]
 mod linalg;
 mod pfm_pfm;
+mod kinematics;

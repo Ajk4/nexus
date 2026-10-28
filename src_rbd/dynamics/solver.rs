@@ -172,14 +172,13 @@ impl GpuSolver {
         args: SolverArgs<'a>,
         prefix_sum_workspace: &'a mut PrefixSumWorkspace,
     ) -> Result<(), GpuBackendError> {
-        // Cleanup zeroes body_constraint_counts, solver_vels, vels, mprops.
+        // Reset constraint counts and copy prescribed body velocities.
         self.cleanup.call(
             pass,
             args.num_colliders * args.num_batches,
             args.body_constraint_counts,
             args.solver_vels,
             args.vels,
-            args.mprops,
             args.batch_indices,
         )?;
 

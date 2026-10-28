@@ -244,7 +244,6 @@ pub fn gpu_solver_cleanup(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] body_constraint_counts: &mut [u32],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] solver_vels: &mut [Velocity],
     #[spirv(storage_buffer, descriptor_set = 1, binding = 0)] vels: &[Velocity],
-    #[spirv(storage_buffer, descriptor_set = 1, binding = 1)] mprops: &[WorldMassProperties],
     #[spirv(uniform, descriptor_set = 1, binding = 2)] batch_ids: &BatchIndices,
 ) {
     let num_threads = num_workgroups.x * WORKGROUP_SIZE;
@@ -254,14 +253,10 @@ pub fn gpu_solver_cleanup(
         let idx = i as usize;
         body_constraint_counts.write(idx, 0);
 
-        // HACK: to handle static bodies.
-        if mprops.at(idx).inv_mass != Vector::ZERO {
-            solver_vels.at_mut(idx).linear = vels.at(idx).linear;
-            solver_vels.at_mut(idx).angular = vels.at(idx).angular;
-        } else {
-            solver_vels.at_mut(idx).linear = Vector::ZERO;
-            solver_vels.at_mut(idx).angular = AngVector::default();
-        }
+        // Zero inverse mass also represents moving kinematic bodies. Their
+        // prescribed velocity participates in contacts but receives no impulse.
+        solver_vels.at_mut(idx).linear = vels.at(idx).linear;
+        solver_vels.at_mut(idx).angular = vels.at(idx).angular;
     }
 }
 
