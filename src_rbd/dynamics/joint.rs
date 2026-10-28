@@ -336,13 +336,22 @@ impl GpuImpulseJointSet {
             color_groups: Tensor::vector(backend, &all_color_groups, usage).unwrap(),
             joints: Tensor::vector(backend, &all_joints, usage).unwrap(),
             builders: Tensor::matrix_uninit(backend, num_batches, max_joints, usage).unwrap(),
-            constraints: Tensor::matrix_uninit(backend, num_batches, max_joints, usage).unwrap(),
+            constraints: Tensor::matrix_uninit(
+                backend, num_batches, max_joints, usage | BufferUsages::COPY_SRC,
+            ).unwrap(),
         }
     }
 
     /// Joint configuration in GPU solver order (grouped by constraint color).
     pub fn data(&self) -> &Tensor<ImpulseJoint> {
         &self.joints
+    }
+
+    /// Solved constraints in the same order as `data()`.
+    /// Element impulses accumulate within a solver substep, not the full timestep.
+    /// Sum `lin_jac * impulse` to obtain the linear impulse applied to body A.
+    pub fn constraints(&self) -> &Tensor<JointConstraint> {
+        &self.constraints
     }
 
     /// Mutable joint configuration for per-step motor updates. Preserve body

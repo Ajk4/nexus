@@ -482,6 +482,11 @@ impl RbdState {
         &self.joints
     }
 
+    /// Duration of one solver substep, in seconds.
+    pub fn solver_substep_dt(&self) -> f32 {
+        self.sim_params_cpu.dt
+    }
+
     /// Mutable impulse-joint data for changing motor targets between steps.
     pub fn joints_mut(&mut self) -> &mut GpuImpulseJointSet {
         &mut self.joints
