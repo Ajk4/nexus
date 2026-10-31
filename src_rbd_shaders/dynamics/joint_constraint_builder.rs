@@ -662,6 +662,7 @@ impl JointConstraintHelper {
         body2: &JointSolverBody,
         _motor_axis: usize,
         motor_params: &MotorParameters,
+        limits: Vec2,
     ) -> JointConstraintElement {
         #[cfg(feature = "dim2")]
         let ang_jac = 1.0;
@@ -679,9 +680,15 @@ impl JointConstraintHelper {
                 crate::asin(clamped_err) * 2.0
             };
 
-            let target_ang = motor_params.target_pos;
-            rhs_wo_bias +=
-                smallest_abs_diff_between_angles(ang_dist, target_ang) * motor_params.erp_inv_dt;
+            let target_ang = motor_params.target_pos.clamp(limits.x, limits.y);
+            // A bounded joint must traverse its allowed interval, even when the
+            // shorter circular path would cross a limit.
+            let error = if limits.y - limits.x < TWO_PI {
+                ang_dist - target_ang
+            } else {
+                smallest_abs_diff_between_angles(ang_dist, target_ang)
+            };
+            rhs_wo_bias += error * motor_params.erp_inv_dt;
         }
 
         rhs_wo_bias += -motor_params.target_vel;
@@ -767,6 +774,10 @@ impl JointConstraintBuilder {
         // Angular motors (uncoupled)
         for i in DIM..SPATIAL_DIM {
             if ((motor_axes & !coupled_axes) & (1u32 << i)) != 0 {
+                let mut limits = Vec2::new(-MAX_FLT, MAX_FLT);
+                if (limit_axes & (1u32 << i)) != 0 {
+                    limits = Vec2::new(joint.limits.at(i).min, joint.limits.at(i).max);
+                }
                 let mp = joint.motors.at(i).motor_params(params.dt);
                 constraint.elements.write(
                     len,
@@ -776,6 +787,7 @@ impl JointConstraintBuilder {
                         &joint_body2,
                         i - DIM,
                         &mp,
+                        limits,
                     ),
                 );
                 len += 1;

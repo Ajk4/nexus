@@ -11,6 +11,8 @@ mod lbvh_validation;
 mod rbd_state;
 mod rbd_state_from_rapier;
 mod rbd_step;
+#[cfg(all(test, feature = "dim2", feature = "cpu"))]
+mod test_angular_motor;
 #[cfg(all(test, feature = "dim3"))]
 mod test_batched_stacks;
 
